@@ -3,8 +3,15 @@
 mod chain;
 mod config;
 mod db;
+mod decode;
+mod explorer;
+mod render;
 mod rpc;
+mod sync;
 
+use std::collections::BTreeMap;
+
+use alloy::primitives::Address;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use comfy_table::Table;
@@ -12,6 +19,7 @@ use comfy_table::Table;
 use crate::chain::Chain;
 use crate::config::Config;
 use crate::db::Db;
+use crate::explorer::Explorer;
 use crate::rpc::{ChainClient, format_eth};
 
 #[derive(Parser)]
@@ -66,9 +74,13 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Chains => chains_cmd(),
         Cmd::Holdings { chain } => holdings_cmd(chain).await,
-        Cmd::Sync { .. } | Cmd::History { .. } | Cmd::Tag { .. } => {
-            anyhow::bail!("subcommand not yet implemented")
-        }
+        Cmd::Sync { chain, address } => sync_cmd(chain, address).await,
+        Cmd::History {
+            address,
+            chain,
+            since,
+        } => history_cmd(address, chain, since),
+        Cmd::Tag { .. } => anyhow::bail!("subcommand not yet implemented"),
     }
 }
 
@@ -154,6 +166,102 @@ async fn holdings_cmd(chain_filter: Option<Chain>) -> Result<()> {
             ]);
         }
     }
+    println!("{table}");
+    Ok(())
+}
+
+async fn sync_cmd(chain_filter: Option<Chain>, alias_filter: Option<String>) -> Result<()> {
+    let cfg = Config::load()?;
+    let api_key = cfg
+        .etherscan_api_key
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("LPORTFOLIO_ETHERSCAN_API_KEY is required for sync"))?;
+    let explorer = Explorer::new(api_key)?;
+    let mut db = Db::open()?;
+
+    let chains: Vec<Chain> = cfg
+        .chains
+        .keys()
+        .copied()
+        .filter(|c| chain_filter.is_none_or(|f| f == *c))
+        .collect();
+    if chains.is_empty() {
+        anyhow::bail!("no chains configured (or none match --chain filter)");
+    }
+
+    let addresses: Vec<(String, Address)> = cfg
+        .addresses
+        .iter()
+        .filter(|(alias, _)| alias_filter.as_deref().is_none_or(|f| *alias == f))
+        .map(|(a, addr)| (a.clone(), *addr))
+        .collect();
+    if addresses.is_empty() {
+        anyhow::bail!("no addresses match --address filter");
+    }
+
+    let mut table = Table::new();
+    table.set_header(vec![
+        "Alias",
+        "Chain",
+        "New txs",
+        "New transfers",
+        "Highest block",
+    ]);
+    for (alias, addr) in &addresses {
+        for chain in &chains {
+            let summary = sync::sync_address(&mut db, &explorer, *chain, alias, *addr).await?;
+            table.add_row(vec![
+                alias.clone(),
+                chain.name().to_string(),
+                summary.tx_count.to_string(),
+                summary.transfer_count.to_string(),
+                if summary.highest_block == 0 {
+                    "-".to_string()
+                } else {
+                    summary.highest_block.to_string()
+                },
+            ]);
+        }
+    }
+    println!("{table}");
+    Ok(())
+}
+
+fn history_cmd(
+    alias_filter: Option<String>,
+    chain_filter: Option<Chain>,
+    since: Option<String>,
+) -> Result<()> {
+    if since.is_some() {
+        anyhow::bail!("--since is not yet implemented");
+    }
+    let cfg = Config::load()?;
+    let db = Db::open()?;
+
+    let addresses: Vec<Address> = cfg
+        .addresses
+        .iter()
+        .filter(|(alias, _)| alias_filter.as_deref().is_none_or(|f| *alias == f))
+        .map(|(_, addr)| *addr)
+        .collect();
+    if addresses.is_empty() {
+        anyhow::bail!("no addresses match --address filter");
+    }
+
+    let aliases: BTreeMap<Address, String> = cfg
+        .addresses
+        .iter()
+        .map(|(alias, addr)| (*addr, alias.clone()))
+        .collect();
+    let labels = db.list_labels()?;
+    let history = db.query_history(&addresses, chain_filter)?;
+
+    if history.is_empty() {
+        println!("(no history; run `lportfolio sync` first)");
+        return Ok(());
+    }
+
+    let table = render::render_history(&history, &aliases, &labels);
     println!("{table}");
     Ok(())
 }
