@@ -1,0 +1,27 @@
+[package]
+name = "lportfolio"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+alloy = { version = "=1.8.3", default-features = false, features = ["std", "rpc-client", "transports", "transport-http", "reqwest-rustls-tls", "providers", "contract", "sol-types"] }
+anyhow = "=1.0.102"
+clap = { version = "=4.6.1", features = ["derive"] }
+comfy-table = { version = "=7.2.2", default-features = false }
+dirs = "=6.0.0"
+dotenvy = "=0.15.7"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+thiserror = "=2.0.18"
+tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
+toml = "=0.9.12"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
