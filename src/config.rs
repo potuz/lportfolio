@@ -11,6 +11,9 @@ pub struct Config {
     pub addresses: BTreeMap<String, Address>,
     pub chains: BTreeMap<Chain, ChainConfig>,
     pub etherscan_api_key: Option<String>,
+    pub beacon_url: Option<String>,
+    pub validator_indices: Vec<u64>,
+    pub csm_operator_ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,12 +43,43 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
 
+        let beacon_url = env::var("LPORTFOLIO_BEACON_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let validator_indices = env::var("LPORTFOLIO_VALIDATOR_INDICES")
+            .ok()
+            .map(|s| parse_u64_list(&s, "validator index"))
+            .transpose()?
+            .unwrap_or_default();
+
+        let csm_operator_ids = env::var("LPORTFOLIO_LIDO_CSM_OPERATOR_IDS")
+            .ok()
+            .map(|s| parse_u64_list(&s, "CSM operator id"))
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(Self {
             addresses,
             chains,
             etherscan_api_key,
+            beacon_url,
+            validator_indices,
+            csm_operator_ids,
         })
     }
+}
+
+fn parse_u64_list(raw: &str, what: &str) -> Result<Vec<u64>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<u64>()
+                .with_context(|| format!("invalid {what} {s:?}"))
+        })
+        .collect()
 }
 
 fn parse_addresses(raw: &str) -> Result<BTreeMap<String, Address>> {

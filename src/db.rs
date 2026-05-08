@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS holdings_snapshot (
     fetched_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     PRIMARY KEY (address, chain_id, token)
 );
+
+CREATE TABLE IF NOT EXISTS staking_snapshot (
+    address            TEXT PRIMARY KEY,
+    validator_count    INTEGER NOT NULL,
+    total_balance_gwei INTEGER NOT NULL,
+    fetched_at         INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 "#;
 
 pub struct Db {
@@ -104,6 +111,12 @@ pub struct UnknownCounterparty {
     pub chain_id: u64,
     pub address: Address,
     pub interactions: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedStakingSummary {
+    pub validator_count: u64,
+    pub total_balance_gwei: u64,
 }
 
 impl Db {
@@ -249,6 +262,60 @@ impl Db {
             transfer_count: token_txs.len(),
             highest_block: highest.unwrap_or(0),
         })
+    }
+
+    pub fn read_staking_snapshot(
+        &self,
+        address: Address,
+        max_age: std::time::Duration,
+    ) -> Result<Option<CachedStakingSummary>> {
+        let row: Option<(i64, i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT validator_count, total_balance_gwei, fetched_at \
+                   FROM staking_snapshot WHERE address = ?1",
+                params![addr_to_db(address)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((count, total, fetched_at)) = row else {
+            return Ok(None);
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let age_secs = (now - fetched_at).max(0) as u64;
+        if age_secs > max_age.as_secs() {
+            return Ok(None);
+        }
+        Ok(Some(CachedStakingSummary {
+            validator_count: count.max(0) as u64,
+            total_balance_gwei: total.max(0) as u64,
+        }))
+    }
+
+    pub fn upsert_staking_snapshot(
+        &mut self,
+        address: Address,
+        validator_count: u64,
+        total_balance_gwei: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO staking_snapshot \
+               (address, validator_count, total_balance_gwei, fetched_at) \
+             VALUES (?1, ?2, ?3, strftime('%s','now')) \
+             ON CONFLICT(address) DO UPDATE SET \
+               validator_count    = excluded.validator_count, \
+               total_balance_gwei = excluded.total_balance_gwei, \
+               fetched_at         = excluded.fetched_at",
+            params![
+                addr_to_db(address),
+                validator_count as i64,
+                total_balance_gwei as i64,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn upsert_label(

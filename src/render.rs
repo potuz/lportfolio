@@ -1,18 +1,66 @@
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
+use std::sync::OnceLock;
 
 use alloy::primitives::{Address, U256};
 use comfy_table::Table;
+use comfy_table::presets::UTF8_FULL;
 
 use crate::chain::Chain;
 use crate::decode::{Action, AssetAmount, DecodedTx, Direction};
+use crate::holdings::{CsmRow, NativeRow, PortfolioSnapshot, StakingRow, gwei_to_wei};
+
+pub mod paint {
+    use super::*;
+
+    static USE_COLOR: OnceLock<bool> = OnceLock::new();
+
+    /// Should we emit ANSI escapes? Decided once per process based on stdout TTY.
+    pub fn enabled() -> bool {
+        *USE_COLOR.get_or_init(|| std::io::stdout().is_terminal())
+    }
+
+    fn wrap(text: &str, code: &str) -> String {
+        if enabled() {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    pub fn bold(s: &str) -> String {
+        wrap(s, "1")
+    }
+    pub fn bold_green(s: &str) -> String {
+        wrap(s, "1;32")
+    }
+
+    pub fn header(text: &str) -> String {
+        if enabled() {
+            format!("\x1b[1;4m{text}\x1b[0m")
+        } else {
+            format!("== {text} ==")
+        }
+    }
+}
+
+fn new_table() -> Table {
+    let mut t = Table::new();
+    t.load_preset(UTF8_FULL);
+    t
+}
+
+fn header_row(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| (*s).to_string()).collect()
+}
 
 pub fn render_history(
     decoded: &[DecodedTx],
     aliases: &BTreeMap<Address, String>,
     labels: &BTreeMap<(u64, Address), String>,
 ) -> Table {
-    let mut table = Table::new();
-    table.set_header(vec!["Time (UTC)", "Chain", "Tx", "Action"]);
+    let mut table = new_table();
+    table.set_header(header_row(&["Time (UTC)", "Chain", "Tx", "Action"]));
     for d in decoded {
         let chain = Chain::from_id(d.chain_id)
             .map(|c| c.name().to_string())
@@ -242,6 +290,115 @@ fn unix_to_ymdhms_utc(ts: u64) -> (i64, u32, u32, u32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d, h, mi, s)
+}
+
+pub fn print_section(heading: &str) {
+    println!("\n{}", paint::header(heading));
+}
+
+pub fn render_native(rows: &[NativeRow]) -> Table {
+    let mut t = new_table();
+    t.set_header(header_row(&["Alias", "Address", "Chain", "Native"]));
+    for r in rows {
+        let amount = format_eth_amount(r.balance_wei);
+        t.add_row(vec![
+            r.alias.clone(),
+            format!("{:#x}", r.address),
+            r.chain.name().to_string(),
+            format!("{amount} ETH"),
+        ]);
+    }
+    t
+}
+
+pub fn render_staking(rows: &[StakingRow]) -> Table {
+    let mut t = new_table();
+    t.set_header(header_row(&[
+        "Alias",
+        "Validators",
+        "Beacon balance",
+        "Source",
+    ]));
+    for r in rows {
+        let balance_wei = gwei_to_wei(r.total_balance_gwei);
+        let amount = format_eth_amount(balance_wei);
+        let source = if r.from_cache { "(cached)" } else { "(fresh)" };
+        t.add_row(vec![
+            r.alias.clone(),
+            r.validator_count.to_string(),
+            format!("{amount} ETH"),
+            source.to_string(),
+        ]);
+    }
+    t
+}
+
+pub fn render_csm(rows: &[CsmRow]) -> Table {
+    let mut t = new_table();
+    t.set_header(header_row(&["Operator ID", "Bond"]));
+    for r in rows {
+        t.add_row(vec![
+            r.operator_id.to_string(),
+            format!("{} stETH", format_eth_amount(r.bond_steth_wei)),
+        ]);
+    }
+    t
+}
+
+pub fn render_summary(snap: &PortfolioSnapshot) -> Table {
+    let mut t = new_table();
+    t.set_header(header_row(&["", "Amount"]));
+
+    let by_chain = snap.native_total_by_chain();
+    for (chain, total) in &by_chain {
+        t.add_row(vec![
+            format!("native on {}", chain.name()),
+            format!("{} ETH", format_eth_amount(*total)),
+        ]);
+    }
+
+    let by_alias = snap.native_total_by_alias();
+    if by_alias.len() > 1 {
+        for (alias, total) in &by_alias {
+            t.add_row(vec![
+                format!("alias {alias}"),
+                format!("{} ETH", format_eth_amount(*total)),
+            ]);
+        }
+    }
+
+    let staking_wei: U256 = snap
+        .staking
+        .iter()
+        .map(|r| gwei_to_wei(r.total_balance_gwei))
+        .sum();
+    if !staking_wei.is_zero() {
+        t.add_row(vec![
+            "beacon staking".to_string(),
+            format!("{} ETH", format_eth_amount(staking_wei)),
+        ]);
+    }
+
+    t
+}
+
+/// Print the grand total below the summary table (ANSI-colored, outside the
+/// table so cell-width math isn't fooled by escape bytes).
+pub fn print_grand_total(snap: &PortfolioSnapshot) {
+    let total = snap.grand_total_eth_wei();
+    println!(
+        "{} {}",
+        paint::bold("Grand total:"),
+        paint::bold_green(&format!("{} ETH", format_eth_amount(total))),
+    );
+    let csm = snap.grand_total_steth_wei();
+    if !csm.is_zero() {
+        println!(
+            "{} {}",
+            paint::bold("CSM bond total:"),
+            paint::bold_green(&format!("{} stETH", format_eth_amount(csm))),
+        );
+    }
 }
 
 #[cfg(test)]

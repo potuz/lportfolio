@@ -1,17 +1,23 @@
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, de::Error as DeError};
+use tracing::warn;
 
 use crate::chain::Chain;
 
 const ENDPOINT: &str = "https://api.etherscan.io/v2/api";
 const PAGE_SIZE: u32 = 10_000;
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(350);
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(2);
+const MAX_RETRIES: u32 = 3;
 
 pub struct Explorer {
     api_key: String,
     http: Client,
+    last_request: Mutex<Option<Instant>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,7 +89,28 @@ impl Explorer {
             .timeout(Duration::from_secs(30))
             .build()
             .context("building http client")?;
-        Ok(Self { api_key, http })
+        Ok(Self {
+            api_key,
+            http,
+            last_request: Mutex::new(None),
+        })
+    }
+
+    async fn throttle(&self) {
+        let wait = {
+            let last = self.last_request.lock().expect("poisoned");
+            match *last {
+                Some(t) => {
+                    let elapsed = Instant::now().saturating_duration_since(t);
+                    MIN_REQUEST_INTERVAL.saturating_sub(elapsed)
+                }
+                None => Duration::ZERO,
+            }
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        *self.last_request.lock().expect("poisoned") = Some(Instant::now());
     }
 
     pub async fn txlist(
@@ -120,29 +147,9 @@ impl Explorer {
         let mut start = from_block;
 
         loop {
-            let resp: EtherscanResp = self
-                .http
-                .get(ENDPOINT)
-                .query(&[
-                    ("chainid", chain.id().to_string()),
-                    ("module", "account".to_string()),
-                    ("action", action.to_string()),
-                    ("address", address.to_string()),
-                    ("startblock", start.to_string()),
-                    ("endblock", "99999999".to_string()),
-                    ("page", "1".to_string()),
-                    ("offset", PAGE_SIZE.to_string()),
-                    ("sort", "asc".to_string()),
-                    ("apikey", self.api_key.clone()),
-                ])
-                .send()
-                .await
-                .context("etherscan request failed")?
-                .error_for_status()
-                .context("etherscan returned http error")?
-                .json()
-                .await
-                .context("parsing etherscan response")?;
+            let resp = self
+                .request_with_retry(action, chain, address, start)
+                .await?;
 
             if resp.status == "0" && resp.message == "No transactions found" {
                 break;
@@ -177,6 +184,70 @@ impl Explorer {
         }
         Ok(all)
     }
+
+    async fn request_with_retry(
+        &self,
+        action: &str,
+        chain: Chain,
+        address: &str,
+        start: u64,
+    ) -> Result<EtherscanResp> {
+        let mut attempt: u32 = 0;
+        loop {
+            self.throttle().await;
+            let resp: EtherscanResp = self
+                .http
+                .get(ENDPOINT)
+                .query(&[
+                    ("chainid", chain.id().to_string()),
+                    ("module", "account".to_string()),
+                    ("action", action.to_string()),
+                    ("address", address.to_string()),
+                    ("startblock", start.to_string()),
+                    ("endblock", "99999999".to_string()),
+                    ("page", "1".to_string()),
+                    ("offset", PAGE_SIZE.to_string()),
+                    ("sort", "asc".to_string()),
+                    ("apikey", self.api_key.clone()),
+                ])
+                .send()
+                .await
+                .context("etherscan request failed")?
+                .error_for_status()
+                .context("etherscan returned http error")?
+                .json()
+                .await
+                .context("parsing etherscan response")?;
+
+            if is_rate_limited(&resp) && attempt < MAX_RETRIES {
+                attempt += 1;
+                let backoff = RATE_LIMIT_BACKOFF * attempt;
+                warn!(
+                    action,
+                    attempt,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "etherscan rate limited; backing off"
+                );
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
+            return Ok(resp);
+        }
+    }
+}
+
+fn is_rate_limited(resp: &EtherscanResp) -> bool {
+    if resp.status == "1" {
+        return false;
+    }
+    let messages: [&str; 2] = ["rate limit", "Max calls per sec"];
+    let result_str = match &resp.result {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => "",
+    };
+    messages
+        .iter()
+        .any(|m| resp.message.contains(m) || result_str.contains(m))
 }
 
 fn de_u64_str<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {

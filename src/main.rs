@@ -2,12 +2,15 @@
 
 mod chain;
 mod config;
+mod csm;
 mod db;
 mod decode;
 mod explorer;
+mod holdings;
 mod interactive;
 mod render;
 mod rpc;
+mod staking;
 mod sync;
 
 use std::collections::BTreeMap;
@@ -22,7 +25,6 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::decode::Registry;
 use crate::explorer::Explorer;
-use crate::rpc::{ChainClient, format_eth};
 
 #[derive(Parser)]
 #[command(
@@ -46,10 +48,11 @@ enum Cmd {
         #[arg(long)]
         address: Option<String>,
     },
-    /// Show current balances.
+    /// Show current balances and overall portfolio total.
     Holdings {
+        /// Bypass the staking-snapshot cache and re-fetch from beaconcha.in.
         #[arg(long)]
-        chain: Option<Chain>,
+        refresh: bool,
     },
     /// Show decoded transaction history.
     History {
@@ -75,15 +78,22 @@ enum Cmd {
         #[arg(long)]
         chain: Option<Chain>,
     },
+    /// Print a shell-completion script. Usage:
+    ///   lportfolio completions bash > ~/.local/share/bash-completion/completions/lportfolio
+    Completions {
+        #[arg(value_enum, default_value = "bash")]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_pipe_friendly_panic_hook();
     init_tracing();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Chains => chains_cmd(),
-        Cmd::Holdings { chain } => holdings_cmd(chain).await,
+        Cmd::Holdings { refresh } => holdings_cmd(refresh).await,
         Cmd::Sync { chain, address } => sync_cmd(chain, address).await,
         Cmd::History {
             address,
@@ -97,6 +107,7 @@ async fn main() -> Result<()> {
             kind,
         } => tag_cmd(address, label, chain, kind),
         Cmd::Unknowns { chain } => unknowns_cmd(chain),
+        Cmd::Completions { shell } => completions_cmd(shell),
     }
 }
 
@@ -107,6 +118,26 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+/// `println!` panics on EPIPE; when output is piped to `head`/`less` and the
+/// reader exits early, that becomes a noisy backtrace. Translate "broken pipe"
+/// panics into a clean exit while leaving other panics alone.
+fn install_pipe_friendly_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<&'static str>()
+            .copied()
+            .map(str::to_owned)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        if msg.contains("Broken pipe") || msg.contains("os error 32") {
+            std::process::exit(0);
+        }
+        default(info);
+    }));
 }
 
 fn chains_cmd() -> Result<()> {
@@ -147,42 +178,37 @@ fn chains_cmd() -> Result<()> {
     Ok(())
 }
 
-async fn holdings_cmd(chain_filter: Option<Chain>) -> Result<()> {
+async fn holdings_cmd(refresh: bool) -> Result<()> {
     let cfg = Config::load()?;
-    let _db = Db::open()?;
+    let mut db = Db::open()?;
+    let snap = holdings::build_snapshot(&cfg, &mut db, refresh).await?;
 
-    let selected: Vec<(Chain, String)> = cfg
-        .chains
-        .iter()
-        .filter(|(c, _)| chain_filter.is_none_or(|f| f == **c))
-        .map(|(c, cc)| (*c, cc.rpc_url.clone()))
-        .collect();
-
-    if selected.is_empty() {
-        anyhow::bail!("no chains configured (or none match --chain filter)");
+    if !snap.native.is_empty() {
+        render::print_section("Native balances");
+        println!("{}", render::render_native(&snap.native));
     }
 
-    let mut clients = Vec::with_capacity(selected.len());
-    for (chain, url) in selected {
-        let client = ChainClient::connect(chain, &url)?;
-        client.verify_chain_id().await?;
-        clients.push(client);
+    if !snap.staking.is_empty() {
+        render::print_section("Beacon staking");
+        println!("{}", render::render_staking(&snap.staking));
     }
 
-    let mut table = Table::new();
-    table.set_header(vec!["Alias", "Address", "Chain", "Native Balance"]);
-    for (alias, addr) in &cfg.addresses {
-        for client in &clients {
-            let balance = client.balance(*addr).await?;
-            table.add_row(vec![
-                alias.clone(),
-                format!("{addr:#x}"),
-                client.chain().name().to_string(),
-                format_eth(balance),
-            ]);
-        }
+    if !snap.csm.is_empty() {
+        render::print_section("Lido CSM bonds");
+        println!("{}", render::render_csm(&snap.csm));
     }
-    println!("{table}");
+
+    render::print_section("Summary");
+    println!("{}", render::render_summary(&snap));
+    render::print_grand_total(&snap);
+    Ok(())
+}
+
+fn completions_cmd(shell: clap_complete::Shell) -> Result<()> {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let bin_name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
     Ok(())
 }
 

@@ -1,8 +1,14 @@
+use std::time::Duration;
+
 use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use anyhow::{Context, Result};
+use tracing::warn;
 
 use crate::chain::Chain;
+
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 pub struct ChainClient {
     chain: Chain,
@@ -18,23 +24,19 @@ impl ChainClient {
         Ok(Self { chain, provider })
     }
 
-    pub fn chain(&self) -> Chain {
-        self.chain
-    }
-
     pub async fn balance(&self, addr: Address) -> Result<U256> {
-        self.provider
-            .get_balance(addr)
-            .await
-            .with_context(|| format!("get_balance on {}", self.chain.name()))
+        self.with_retry("get_balance", || async {
+            self.provider.get_balance(addr).await
+        })
+        .await
     }
 
     pub async fn verify_chain_id(&self) -> Result<()> {
         let observed = self
-            .provider
-            .get_chain_id()
-            .await
-            .with_context(|| format!("get_chain_id on {}", self.chain.name()))?;
+            .with_retry("get_chain_id", || async {
+                self.provider.get_chain_id().await
+            })
+            .await?;
         if observed != self.chain.id() {
             anyhow::bail!(
                 "RPC for {} returned chain id {observed}, expected {}",
@@ -44,59 +46,34 @@ impl ChainClient {
         }
         Ok(())
     }
-}
 
-pub fn format_eth(wei: U256) -> String {
-    let raw = wei.to_string();
-    let padded = if raw.len() < 19 {
-        format!("{:0>19}", raw)
-    } else {
-        raw
-    };
-    let len = padded.len();
-    let int_part = &padded[..len - 18];
-    let frac6 = &padded[len - 18..len - 12];
-    let mut combined = format!("{int_part}.{frac6}");
-    while combined.ends_with('0') {
-        combined.pop();
-    }
-    if combined.ends_with('.') {
-        combined.pop();
-    }
-    format!("{combined} ETH")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn format_eth_zero() {
-        assert_eq!(format_eth(U256::ZERO), "0 ETH");
-    }
-
-    #[test]
-    fn format_eth_one() {
-        let one_eth = U256::from(10u64).pow(U256::from(18));
-        assert_eq!(format_eth(one_eth), "1 ETH");
-    }
-
-    #[test]
-    fn format_eth_fractional() {
-        let half_eth = U256::from(10u64).pow(U256::from(18)) / U256::from(2u64);
-        assert_eq!(format_eth(half_eth), "0.5 ETH");
-    }
-
-    #[test]
-    fn format_eth_truncates_to_six_decimals() {
-        // 1.234567890123 ETH — should display 1.234567 (truncated, not rounded)
-        let v = U256::from(1_234_567_890_123_000_000u128);
-        assert_eq!(format_eth(v), "1.234567 ETH");
-    }
-
-    #[test]
-    fn format_eth_below_six_decimals_shows_zero() {
-        // 1 wei — below display precision
-        assert_eq!(format_eth(U256::from(1u64)), "0 ETH");
+    async fn with_retry<F, Fut, T, E>(&self, label: &str, mut f: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, E>>,
+        E: std::fmt::Display + std::error::Error + Send + Sync + 'static,
+    {
+        let mut attempt: u32 = 0;
+        loop {
+            match f().await {
+                Ok(v) => return Ok(v),
+                Err(e) if attempt < MAX_RETRIES => {
+                    attempt += 1;
+                    let backoff = INITIAL_BACKOFF * (1u32 << attempt);
+                    warn!(
+                        chain = self.chain.name(),
+                        op = label,
+                        attempt,
+                        backoff_ms = backoff.as_millis() as u64,
+                        error = %e,
+                        "RPC error; retrying",
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("{label} on {}", self.chain.name()));
+                }
+            }
+        }
     }
 }
