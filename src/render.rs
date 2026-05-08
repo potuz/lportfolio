@@ -240,7 +240,7 @@ pub fn format_token_amount(amount: U256, decimals: u32) -> String {
 
 fn format_with_decimals(amount: U256, decimals: u32, max_frac: u32) -> String {
     if decimals == 0 {
-        return amount.to_string();
+        return add_thousands_separators(&amount.to_string());
     }
     let raw = amount.to_string();
     let need_len = decimals as usize + 1;
@@ -253,7 +253,7 @@ fn format_with_decimals(amount: U256, decimals: u32, max_frac: u32) -> String {
     let int_part = &padded[..len - decimals as usize];
     let frac_full = &padded[len - decimals as usize..];
     let frac_keep = &frac_full[..max_frac as usize];
-    let mut combined = format!("{int_part}.{frac_keep}");
+    let mut combined = format!("{}.{}", add_thousands_separators(int_part), frac_keep);
     while combined.ends_with('0') {
         combined.pop();
     }
@@ -261,6 +261,58 @@ fn format_with_decimals(amount: U256, decimals: u32, max_frac: u32) -> String {
         combined.pop();
     }
     combined
+}
+
+/// Compact fixed-decimal format used inside holdings cells. Always shows
+/// `frac_digits` decimal places, with thousands separators on the integer
+/// part. Truncates (does not round) precision below the chosen step.
+pub fn format_amount_compact(amount: U256, decimals: u8, frac_digits: u8) -> String {
+    let int_part_str: String;
+    let frac_part_str: String;
+    let target = frac_digits as usize;
+    if decimals == 0 {
+        int_part_str = amount.to_string();
+        frac_part_str = "0".repeat(target);
+    } else {
+        let raw = amount.to_string();
+        let need_len = decimals as usize + 1;
+        let padded = if raw.len() < need_len {
+            format!("{:0>width$}", raw, width = need_len)
+        } else {
+            raw
+        };
+        let len = padded.len();
+        int_part_str = padded[..len - decimals as usize].to_string();
+        let frac_full = &padded[len - decimals as usize..];
+        frac_part_str = if frac_full.len() >= target {
+            frac_full[..target].to_string()
+        } else {
+            format!("{frac_full:0<target$}")
+        };
+    }
+    if target == 0 {
+        return add_thousands_separators(&int_part_str);
+    }
+    format!(
+        "{}.{}",
+        add_thousands_separators(&int_part_str),
+        frac_part_str
+    )
+}
+
+fn add_thousands_separators(int_str: &str) -> String {
+    let len = int_str.len();
+    if len <= 3 {
+        return int_str.to_string();
+    }
+    let mut out = String::with_capacity(len + (len - 1) / 3);
+    for (i, c) in int_str.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn format_unix_utc(ts: u64) -> String {
@@ -296,10 +348,72 @@ pub fn print_section(heading: &str) {
     println!("\n{}", paint::header(heading));
 }
 
+/// Aggregate of one cell (or a row/column total): native ETH plus a
+/// symbol → (amount, decimals) map of ERC-20 holdings.
+#[derive(Default, Clone)]
+struct CellAgg {
+    native_wei: U256,
+    tokens: BTreeMap<String, (U256, u8)>,
+}
+
+impl CellAgg {
+    fn add_native(&mut self, wei: U256) {
+        self.native_wei += wei;
+    }
+    fn add_token(&mut self, symbol: &str, amount: U256, decimals: u8) {
+        let entry = self
+            .tokens
+            .entry(symbol.to_string())
+            .or_insert((U256::ZERO, decimals));
+        entry.0 += amount;
+    }
+    fn merge(&mut self, other: &CellAgg) {
+        self.native_wei += other.native_wei;
+        for (sym, (amt, dec)) in &other.tokens {
+            let entry = self.tokens.entry(sym.clone()).or_insert((U256::ZERO, *dec));
+            entry.0 += *amt;
+        }
+    }
+    fn render(&self) -> String {
+        // Build (amount_str, symbol) pairs first, then right-align amounts so
+        // the symbol column lines up regardless of how wide each number is.
+        let mut entries: Vec<(String, &str)> = Vec::new();
+        entries.push((format_amount_compact(self.native_wei, 18, 4), "ETH"));
+        for (sym, (amt, dec)) in &self.tokens {
+            if !meets_token_threshold(*amt, *dec) {
+                continue;
+            }
+            entries.push((format_amount_compact(*amt, *dec, 2), sym.as_str()));
+        }
+        let max_amt_width = entries
+            .iter()
+            .map(|(a, _)| a.chars().count())
+            .max()
+            .unwrap_or(0);
+        entries
+            .iter()
+            .map(|(amt, sym)| format!("{amt:>max_amt_width$} {sym}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// 0.01 of `decimals`-precision token in raw units, or 1 wei for very
+/// low-decimal tokens.
+fn meets_token_threshold(amount: U256, decimals: u8) -> bool {
+    if amount.is_zero() {
+        return false;
+    }
+    if decimals < 2 {
+        return true;
+    }
+    let scale = U256::from(10u64).pow(U256::from(u64::from(decimals - 2)));
+    amount >= scale
+}
+
 pub fn render_native(rows: &[NativeRow]) -> Table {
     let mut t = new_table();
 
-    // One column per chain that has any data, in the canonical Chain::ALL order.
     let present_chains: Vec<Chain> = Chain::ALL
         .iter()
         .copied()
@@ -313,38 +427,42 @@ pub fn render_native(rows: &[NativeRow]) -> Table {
     header_cells.push("Total");
     t.set_header(header_row(&header_cells));
 
-    // Group rows by (alias, address). BTreeMap gives stable alpha-by-alias ordering.
-    let mut grouped: BTreeMap<(String, Address), BTreeMap<Chain, U256>> = BTreeMap::new();
+    let mut grouped: BTreeMap<(String, Address), BTreeMap<Chain, CellAgg>> = BTreeMap::new();
     for r in rows {
-        grouped
+        let cell = grouped
             .entry((r.alias.clone(), r.address))
             .or_default()
-            .insert(r.chain, r.balance_wei);
+            .entry(r.chain)
+            .or_default();
+        cell.add_native(r.balance_wei);
+        for tok in &r.tokens {
+            cell.add_token(&tok.display_symbol, tok.amount, tok.decimals);
+        }
     }
 
-    let mut chain_totals: BTreeMap<Chain, U256> = BTreeMap::new();
-    let mut grand_total = U256::ZERO;
+    let mut col_totals: BTreeMap<Chain, CellAgg> = BTreeMap::new();
+    let mut grand = CellAgg::default();
 
-    for ((alias, address), balances) in &grouped {
+    for ((alias, address), per_chain) in &grouped {
         let mut cells: Vec<String> = vec![alias.clone(), format!("{address:#x}")];
-        let mut row_total = U256::ZERO;
+        let mut row_total = CellAgg::default();
         for chain in &present_chains {
-            let bal = balances.get(chain).copied().unwrap_or(U256::ZERO);
-            row_total += bal;
-            *chain_totals.entry(*chain).or_insert(U256::ZERO) += bal;
-            cells.push(format!("{} ETH", format_eth_amount(bal)));
+            let cell = per_chain.get(chain).cloned().unwrap_or_default();
+            row_total.merge(&cell);
+            col_totals.entry(*chain).or_default().merge(&cell);
+            cells.push(cell.render());
         }
-        cells.push(format!("{} ETH", format_eth_amount(row_total)));
-        grand_total += row_total;
+        grand.merge(&row_total);
+        cells.push(row_total.render());
         t.add_row(cells);
     }
 
     let mut total_cells: Vec<String> = vec!["Total".into(), String::new()];
     for chain in &present_chains {
-        let bal = chain_totals.get(chain).copied().unwrap_or(U256::ZERO);
-        total_cells.push(format!("{} ETH", format_eth_amount(bal)));
+        let agg = col_totals.get(chain).cloned().unwrap_or_default();
+        total_cells.push(agg.render());
     }
-    total_cells.push(format!("{} ETH", format_eth_amount(grand_total)));
+    total_cells.push(grand.render());
     t.add_row(total_cells);
 
     t

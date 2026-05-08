@@ -14,6 +14,7 @@ pub struct Config {
     pub beacon_url: Option<String>,
     pub validator_indices: Vec<u64>,
     pub csm_operator_ids: Vec<u64>,
+    pub token_whitelist: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,17 @@ impl Config {
             .transpose()?
             .unwrap_or_default();
 
+        let token_whitelist = env::var("LPORTFOLIO_TOKEN_WHITELIST")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             addresses,
             chains,
@@ -67,6 +79,7 @@ impl Config {
             beacon_url,
             validator_indices,
             csm_operator_ids,
+            token_whitelist,
         })
     }
 }

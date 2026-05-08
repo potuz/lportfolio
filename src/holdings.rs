@@ -10,9 +10,17 @@ use crate::csm::CsmReader;
 use crate::db::Db;
 use crate::rpc::ChainClient;
 use crate::staking::BeaconNodeClient;
+use crate::tokens;
 
 const STAKING_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const GWEI_PER_ETH: u64 = 1_000_000_000;
+
+#[derive(Debug, Clone)]
+pub struct TokenBalance {
+    pub display_symbol: String,
+    pub decimals: u8,
+    pub amount: U256,
+}
 
 #[derive(Debug, Clone)]
 pub struct NativeRow {
@@ -20,6 +28,7 @@ pub struct NativeRow {
     pub address: Address,
     pub chain: Chain,
     pub balance_wei: U256,
+    pub tokens: Vec<TokenBalance>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,22 +103,45 @@ async fn collect_native(cfg: &Config) -> Result<Vec<NativeRow>> {
     let mut rows = Vec::with_capacity(cfg.addresses.len() * clients.len());
     for (alias, addr) in &cfg.addresses {
         for (chain, client) in &clients {
-            match client.balance(*addr).await {
-                Ok(balance) => rows.push(NativeRow {
-                    alias: alias.clone(),
-                    address: *addr,
-                    chain: *chain,
-                    balance_wei: balance,
-                }),
+            let balance_wei = match client.balance(*addr).await {
+                Ok(b) => b,
                 Err(e) => {
                     warn!(
                         alias,
                         chain = chain.name(),
-                        error = %e,
-                        "balance fetch failed; omitting from table"
+                        "native balance fetch failed; omitting from table: {:#}",
+                        e
                     );
+                    continue;
+                }
+            };
+
+            let mut tokens = Vec::new();
+            for deployment in tokens::deployments_for(chain.id(), &cfg.token_whitelist) {
+                match client.erc20_balance(deployment.address, *addr).await {
+                    Ok(amount) if !amount.is_zero() => tokens.push(TokenBalance {
+                        display_symbol: deployment.display_symbol.to_string(),
+                        decimals: deployment.decimals,
+                        amount,
+                    }),
+                    Ok(_) => {}
+                    Err(e) => warn!(
+                        alias,
+                        chain = chain.name(),
+                        token = deployment.display_symbol,
+                        "ERC-20 balance fetch failed: {:#}",
+                        e
+                    ),
                 }
             }
+
+            rows.push(NativeRow {
+                alias: alias.clone(),
+                address: *addr,
+                chain: *chain,
+                balance_wei,
+                tokens,
+            });
         }
     }
     Ok(rows)
@@ -200,6 +232,7 @@ mod tests {
                 address: Address::default(),
                 chain: Chain::Mainnet,
                 balance_wei: U256::from(10u64).pow(U256::from(18)),
+                tokens: Vec::new(),
             }],
             staking: vec![StakingRow {
                 alias: "a".into(),

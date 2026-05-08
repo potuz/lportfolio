@@ -12,6 +12,7 @@ mod render;
 mod rpc;
 mod staking;
 mod sync;
+mod tokens;
 
 use std::collections::BTreeMap;
 

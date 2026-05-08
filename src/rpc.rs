@@ -2,10 +2,18 @@ use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
+use alloy::sol;
 use anyhow::{Context, Result};
 use tracing::warn;
 
 use crate::chain::Chain;
+
+sol! {
+    #[sol(rpc)]
+    interface IERC20 {
+        function balanceOf(address) external view returns (uint256);
+    }
+}
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
@@ -27,6 +35,14 @@ impl ChainClient {
     pub async fn balance(&self, addr: Address) -> Result<U256> {
         self.with_retry("get_balance", || async {
             self.provider.get_balance(addr).await
+        })
+        .await
+    }
+
+    pub async fn erc20_balance(&self, token: Address, holder: Address) -> Result<U256> {
+        let contract = IERC20::new(token, &self.provider);
+        self.with_retry("erc20.balanceOf", || async {
+            contract.balanceOf(holder).call().await
         })
         .await
     }
