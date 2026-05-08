@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::chain::Chain;
-use crate::decode::DecodedTx;
-use crate::decode::erc20::{RawTransfer, RawTx, synthesize};
+use crate::decode::erc20::{RawTransfer, RawTx};
+use crate::decode::{DecodedTx, Registry};
 use crate::explorer::{EtherscanTokenTx, EtherscanTx};
 
 const SCHEMA_SQL: &str = r#"
@@ -97,6 +97,13 @@ pub struct SyncSummary {
     pub tx_count: usize,
     pub transfer_count: usize,
     pub highest_block: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnknownCounterparty {
+    pub chain_id: u64,
+    pub address: Address,
+    pub interactions: u64,
 }
 
 impl Db {
@@ -244,6 +251,93 @@ impl Db {
         })
     }
 
+    pub fn upsert_label(
+        &mut self,
+        chain: Chain,
+        address: Address,
+        label: &str,
+        kind: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO labels (chain_id, address, label, kind)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(chain_id, address) DO UPDATE SET
+               label = excluded.label,
+               kind  = excluded.kind",
+            params![chain.id() as i64, addr_to_db(address), label, kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn unknown_counterparties(
+        &self,
+        addresses: &[Address],
+        chain_filter: Option<Chain>,
+    ) -> Result<Vec<UnknownCounterparty>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let owned: HashSet<String> = addresses.iter().copied().map(addr_to_db).collect();
+        let addr_strs: Vec<String> = owned.iter().cloned().collect();
+        let n = addr_strs.len();
+        let in_clause = vec!["?"; n].join(",");
+
+        let mut sql = format!(
+            "SELECT chain_id, to_addr AS counterparty FROM transactions
+               WHERE to_addr IS NOT NULL
+                 AND from_addr IN ({in_clause})
+             UNION ALL
+             SELECT chain_id,
+                    CASE WHEN from_addr IN ({in_clause}) THEN to_addr ELSE from_addr END
+                      AS counterparty
+               FROM transfers
+               WHERE from_addr IN ({in_clause}) OR to_addr IN ({in_clause})"
+        );
+        if let Some(c) = chain_filter {
+            sql = format!("SELECT * FROM ({sql}) WHERE chain_id = {}", c.id() as i64);
+        }
+        sql = format!(
+            "SELECT chain_id, counterparty, COUNT(*) FROM ({sql}) \
+             WHERE counterparty IS NOT NULL \
+             GROUP BY chain_id, counterparty"
+        );
+
+        let mut all_params: Vec<&String> = Vec::with_capacity(4 * n);
+        for _ in 0..4 {
+            all_params.extend(addr_strs.iter());
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(all_params.iter()), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (chain_id, addr_str, count) = row?;
+            if owned.contains(&addr_str) {
+                continue;
+            }
+            if let Ok(addr) = addr_str.parse::<Address>() {
+                out.push(UnknownCounterparty {
+                    chain_id: chain_id as u64,
+                    address: addr,
+                    interactions: count as u64,
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            b.interactions
+                .cmp(&a.interactions)
+                .then(a.chain_id.cmp(&b.chain_id))
+        });
+        Ok(out)
+    }
+
     pub fn list_labels(&self) -> Result<BTreeMap<(u64, Address), String>> {
         let mut stmt = self
             .conn
@@ -267,6 +361,7 @@ impl Db {
 
     pub fn query_history(
         &self,
+        registry: &Registry,
         addresses: &[Address],
         chain_filter: Option<Chain>,
     ) -> Result<Vec<DecodedTx>> {
@@ -308,7 +403,7 @@ impl Db {
             let raw_tx = self.fetch_tx(*chain_id, hash)?;
             let transfers = self.fetch_transfers(*chain_id, hash)?;
             let us_for_this_tx = pick_us(addresses, &raw_tx, &transfers).unwrap_or(addresses[0]);
-            let dec = synthesize(us_for_this_tx, &raw_tx, &transfers);
+            let dec = registry.decode_tx(us_for_this_tx, &raw_tx, &transfers);
             decoded.push(dec);
         }
 
@@ -503,7 +598,10 @@ mod tests {
         assert_eq!(summary.highest_block, 110);
         assert_eq!(db.last_synced_block(addr, Chain::Mainnet).unwrap(), 110);
 
-        let history = db.query_history(&[addr], Some(Chain::Mainnet)).unwrap();
+        let registry = Registry::default_set();
+        let history = db
+            .query_history(&registry, &[addr], Some(Chain::Mainnet))
+            .unwrap();
         assert_eq!(history.len(), 2);
         std::fs::remove_file(&tmp).ok();
     }

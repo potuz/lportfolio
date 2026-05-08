@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod decode;
 mod explorer;
+mod interactive;
 mod render;
 mod rpc;
 mod sync;
@@ -19,6 +20,7 @@ use comfy_table::Table;
 use crate::chain::Chain;
 use crate::config::Config;
 use crate::db::Db;
+use crate::decode::Registry;
 use crate::explorer::Explorer;
 use crate::rpc::{ChainClient, format_eth};
 
@@ -63,7 +65,15 @@ enum Cmd {
         address: String,
         label: String,
         #[arg(long)]
-        protocol: Option<String>,
+        chain: Option<Chain>,
+        #[arg(long, default_value = "contract")]
+        kind: String,
+    },
+    /// List counterparties with no label and no decoder coverage.
+    /// In a TTY, prompts to label each one.
+    Unknowns {
+        #[arg(long)]
+        chain: Option<Chain>,
     },
 }
 
@@ -80,7 +90,13 @@ async fn main() -> Result<()> {
             chain,
             since,
         } => history_cmd(address, chain, since),
-        Cmd::Tag { .. } => anyhow::bail!("subcommand not yet implemented"),
+        Cmd::Tag {
+            address,
+            label,
+            chain,
+            kind,
+        } => tag_cmd(address, label, chain, kind),
+        Cmd::Unknowns { chain } => unknowns_cmd(chain),
     }
 }
 
@@ -253,8 +269,14 @@ fn history_cmd(
         .iter()
         .map(|(alias, addr)| (*addr, alias.clone()))
         .collect();
-    let labels = db.list_labels()?;
-    let history = db.query_history(&addresses, chain_filter)?;
+    let registry = Registry::default_set();
+    let mut labels = db.list_labels()?;
+    for known in registry.known_labels() {
+        labels
+            .entry((known.chain_id, known.address))
+            .or_insert_with(|| known.label.to_string());
+    }
+    let history = db.query_history(&registry, &addresses, chain_filter)?;
 
     if history.is_empty() {
         println!("(no history; run `lportfolio sync` first)");
@@ -263,5 +285,79 @@ fn history_cmd(
 
     let table = render::render_history(&history, &aliases, &labels);
     println!("{table}");
+    Ok(())
+}
+
+fn tag_cmd(address: String, label: String, chain: Option<Chain>, kind: String) -> Result<()> {
+    let chain = chain.unwrap_or(Chain::Mainnet);
+    let addr: Address = address
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid address {address:?}: {e}"))?;
+    let mut db = Db::open()?;
+    db.upsert_label(chain, addr, &label, &kind)?;
+    println!("tagged {addr:#x} on {} as {label:?} ({kind})", chain.name());
+    Ok(())
+}
+
+fn unknowns_cmd(chain_filter: Option<Chain>) -> Result<()> {
+    let cfg = Config::load()?;
+    let mut db = Db::open()?;
+    let registry = Registry::default_set();
+
+    let owned: Vec<Address> = cfg.addresses.values().copied().collect();
+    if owned.is_empty() {
+        anyhow::bail!("no addresses configured");
+    }
+
+    let counterparties = db.unknown_counterparties(&owned, chain_filter)?;
+    let known_labels = db.list_labels()?;
+    let registry_known: std::collections::HashSet<(u64, Address)> = registry
+        .known_labels()
+        .into_iter()
+        .map(|k| (k.chain_id, k.address))
+        .collect();
+
+    let unlabeled: Vec<_> = counterparties
+        .into_iter()
+        .filter(|c| {
+            !known_labels.contains_key(&(c.chain_id, c.address))
+                && !registry_known.contains(&(c.chain_id, c.address))
+        })
+        .collect();
+
+    if unlabeled.is_empty() {
+        println!("No unlabeled counterparties.");
+        return Ok(());
+    }
+
+    match interactive::prompt_unknowns(&mut db, &unlabeled)? {
+        Some(outcome) => {
+            println!(
+                "\ndone: {} tagged, {} skipped, {} remaining",
+                outcome.tagged,
+                outcome.skipped,
+                unlabeled.len() - outcome.tagged - outcome.skipped,
+            );
+        }
+        None => {
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec!["Chain", "Address", "Interactions"]);
+            for u in &unlabeled {
+                let chain = Chain::from_id(u.chain_id)
+                    .map(|c| c.name().to_string())
+                    .unwrap_or_else(|| u.chain_id.to_string());
+                table.add_row(vec![
+                    chain,
+                    format!("{:#x}", u.address),
+                    u.interactions.to_string(),
+                ]);
+            }
+            println!("{table}");
+            println!(
+                "\n{} unlabeled counterparties. Run `lportfolio tag <address> <label>` to label.",
+                unlabeled.len()
+            );
+        }
+    }
     Ok(())
 }

@@ -4,7 +4,7 @@ use alloy::primitives::{Address, U256};
 use comfy_table::Table;
 
 use crate::chain::Chain;
-use crate::decode::{Action, DecodedTx, Direction};
+use crate::decode::{Action, AssetAmount, DecodedTx, Direction};
 
 pub fn render_history(
     decoded: &[DecodedTx],
@@ -100,7 +100,53 @@ fn format_action(
             let cp = display_address(*contract, chain_id, aliases, labels);
             format!("Called contract {cp}")
         }
+        Action::Protocol {
+            protocol,
+            kind,
+            contract,
+            sent,
+            received,
+        } => {
+            let header = format!(
+                "[{protocol}] {kind} ({})",
+                display_address(*contract, chain_id, aliases, labels),
+                kind = kind.label(),
+            );
+            let sent_part = if sent.is_empty() {
+                String::new()
+            } else {
+                format!(" sent {}", join_assets(sent))
+            };
+            let recv_part = if received.is_empty() {
+                String::new()
+            } else {
+                format!(" received {}", join_assets(received))
+            };
+            format!("{header}{sent_part}{recv_part}")
+        }
     }
+}
+
+fn join_assets(items: &[AssetAmount]) -> String {
+    items
+        .iter()
+        .map(|a| {
+            let display_amount = match a.token {
+                None => format_eth_amount(a.amount),
+                Some(_) => format_token_amount(a.amount, a.decimals),
+            };
+            let symbol = if a.symbol.is_empty() {
+                match a.token {
+                    None => "ETH".to_string(),
+                    Some(addr) => short_addr(addr),
+                }
+            } else {
+                a.symbol.clone()
+            };
+            format!("{display_amount} {symbol}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn display_address(
