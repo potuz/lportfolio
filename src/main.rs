@@ -186,7 +186,7 @@ async fn holdings_cmd(refresh: bool) -> Result<()> {
 
     if !snap.native.is_empty() {
         render::print_section("Native balances");
-        println!("{}", render::render_native(&snap.native));
+        println!("{}", render::render_native(&snap.native, &cfg.safes));
     }
 
     if !snap.staking.is_empty() {

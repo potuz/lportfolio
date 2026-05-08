@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 
 use alloy::primitives::Address;
@@ -15,6 +15,7 @@ pub struct Config {
     pub validator_indices: Vec<u64>,
     pub csm_operator_ids: Vec<u64>,
     pub token_whitelist: Vec<String>,
+    pub safes: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +73,22 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let safes: BTreeSet<String> = env::var("LPORTFOLIO_SAFES")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for alias in &safes {
+            if !addresses.contains_key(alias) {
+                bail!("LPORTFOLIO_SAFES references unknown alias: {alias:?}");
+            }
+        }
+
         Ok(Self {
             addresses,
             chains,
@@ -80,6 +97,7 @@ impl Config {
             validator_indices,
             csm_operator_ids,
             token_whitelist,
+            safes,
         })
     }
 }

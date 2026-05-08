@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
@@ -411,7 +411,7 @@ fn meets_token_threshold(amount: U256, decimals: u8) -> bool {
     amount >= scale
 }
 
-pub fn render_native(rows: &[NativeRow]) -> Table {
+pub fn render_native(rows: &[NativeRow], safes: &BTreeSet<String>) -> Table {
     let mut t = new_table();
 
     let present_chains: Vec<Chain> = Chain::ALL
@@ -444,7 +444,12 @@ pub fn render_native(rows: &[NativeRow]) -> Table {
     let mut grand = CellAgg::default();
 
     for ((alias, address), per_chain) in &grouped {
-        let mut cells: Vec<String> = vec![alias.clone(), format!("{address:#x}")];
+        let alias_display = if safes.contains(alias) {
+            format!("{alias} (Safe)")
+        } else {
+            alias.clone()
+        };
+        let mut cells: Vec<String> = vec![alias_display, format!("{address:#x}")];
         let mut row_total = CellAgg::default();
         for chain in &present_chains {
             let cell = per_chain.get(chain).cloned().unwrap_or_default();
