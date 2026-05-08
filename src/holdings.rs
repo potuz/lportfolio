@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
@@ -62,25 +61,6 @@ impl PortfolioSnapshot {
             total += r.bond_steth_wei;
         }
         total
-    }
-
-    pub fn native_total_by_chain(&self) -> BTreeMap<Chain, U256> {
-        let mut out: BTreeMap<Chain, U256> = BTreeMap::new();
-        for r in &self.native {
-            *out.entry(r.chain).or_insert(U256::ZERO) += r.balance_wei;
-        }
-        out
-    }
-
-    /// Per-alias native total (chains summed). Staking is reported separately
-    /// in the summary under its own row, since validator indices aren't tied
-    /// to a specific eth1-address alias.
-    pub fn native_total_by_alias(&self) -> BTreeMap<String, U256> {
-        let mut out: BTreeMap<String, U256> = BTreeMap::new();
-        for r in &self.native {
-            *out.entry(r.alias.clone()).or_insert(U256::ZERO) += r.balance_wei;
-        }
-        out
     }
 }
 
@@ -232,36 +212,5 @@ mod tests {
         let total = snap.grand_total_eth_wei();
         let expected = U256::from(33u64) * U256::from(10u64).pow(U256::from(18));
         assert_eq!(total, expected);
-    }
-
-    #[test]
-    fn native_by_chain_aggregates() {
-        let snap = PortfolioSnapshot {
-            native: vec![
-                NativeRow {
-                    alias: "a".into(),
-                    address: Address::default(),
-                    chain: Chain::Mainnet,
-                    balance_wei: U256::from(1u64),
-                },
-                NativeRow {
-                    alias: "b".into(),
-                    address: Address::default(),
-                    chain: Chain::Mainnet,
-                    balance_wei: U256::from(2u64),
-                },
-                NativeRow {
-                    alias: "a".into(),
-                    address: Address::default(),
-                    chain: Chain::Arbitrum,
-                    balance_wei: U256::from(5u64),
-                },
-            ],
-            staking: vec![],
-            csm: vec![],
-        };
-        let by_chain = snap.native_total_by_chain();
-        assert_eq!(by_chain[&Chain::Mainnet], U256::from(3u64));
-        assert_eq!(by_chain[&Chain::Arbitrum], U256::from(5u64));
     }
 }

@@ -298,16 +298,55 @@ pub fn print_section(heading: &str) {
 
 pub fn render_native(rows: &[NativeRow]) -> Table {
     let mut t = new_table();
-    t.set_header(header_row(&["Alias", "Address", "Chain", "Native"]));
-    for r in rows {
-        let amount = format_eth_amount(r.balance_wei);
-        t.add_row(vec![
-            r.alias.clone(),
-            format!("{:#x}", r.address),
-            r.chain.name().to_string(),
-            format!("{amount} ETH"),
-        ]);
+
+    // One column per chain that has any data, in the canonical Chain::ALL order.
+    let present_chains: Vec<Chain> = Chain::ALL
+        .iter()
+        .copied()
+        .filter(|c| rows.iter().any(|r| r.chain == *c))
+        .collect();
+
+    let mut header_cells: Vec<&str> = vec!["Alias", "Address"];
+    for chain in &present_chains {
+        header_cells.push(chain.name());
     }
+    header_cells.push("Total");
+    t.set_header(header_row(&header_cells));
+
+    // Group rows by (alias, address). BTreeMap gives stable alpha-by-alias ordering.
+    let mut grouped: BTreeMap<(String, Address), BTreeMap<Chain, U256>> = BTreeMap::new();
+    for r in rows {
+        grouped
+            .entry((r.alias.clone(), r.address))
+            .or_default()
+            .insert(r.chain, r.balance_wei);
+    }
+
+    let mut chain_totals: BTreeMap<Chain, U256> = BTreeMap::new();
+    let mut grand_total = U256::ZERO;
+
+    for ((alias, address), balances) in &grouped {
+        let mut cells: Vec<String> = vec![alias.clone(), format!("{address:#x}")];
+        let mut row_total = U256::ZERO;
+        for chain in &present_chains {
+            let bal = balances.get(chain).copied().unwrap_or(U256::ZERO);
+            row_total += bal;
+            *chain_totals.entry(*chain).or_insert(U256::ZERO) += bal;
+            cells.push(format!("{} ETH", format_eth_amount(bal)));
+        }
+        cells.push(format!("{} ETH", format_eth_amount(row_total)));
+        grand_total += row_total;
+        t.add_row(cells);
+    }
+
+    let mut total_cells: Vec<String> = vec!["Total".into(), String::new()];
+    for chain in &present_chains {
+        let bal = chain_totals.get(chain).copied().unwrap_or(U256::ZERO);
+        total_cells.push(format!("{} ETH", format_eth_amount(bal)));
+    }
+    total_cells.push(format!("{} ETH", format_eth_amount(grand_total)));
+    t.add_row(total_cells);
+
     t
 }
 
@@ -345,45 +384,8 @@ pub fn render_csm(rows: &[CsmRow]) -> Table {
     t
 }
 
-pub fn render_summary(snap: &PortfolioSnapshot) -> Table {
-    let mut t = new_table();
-    t.set_header(header_row(&["", "Amount"]));
-
-    let by_chain = snap.native_total_by_chain();
-    for (chain, total) in &by_chain {
-        t.add_row(vec![
-            format!("native on {}", chain.name()),
-            format!("{} ETH", format_eth_amount(*total)),
-        ]);
-    }
-
-    let by_alias = snap.native_total_by_alias();
-    if by_alias.len() > 1 {
-        for (alias, total) in &by_alias {
-            t.add_row(vec![
-                format!("alias {alias}"),
-                format!("{} ETH", format_eth_amount(*total)),
-            ]);
-        }
-    }
-
-    let staking_wei: U256 = snap
-        .staking
-        .iter()
-        .map(|r| gwei_to_wei(r.total_balance_gwei))
-        .sum();
-    if !staking_wei.is_zero() {
-        t.add_row(vec![
-            "beacon staking".to_string(),
-            format!("{} ETH", format_eth_amount(staking_wei)),
-        ]);
-    }
-
-    t
-}
-
-/// Print the grand total below the summary table (ANSI-colored, outside the
-/// table so cell-width math isn't fooled by escape bytes).
+/// Print the grand total after the holdings tables. ANSI escapes live here
+/// (outside any table) so cell-width math isn't fooled by escape bytes.
 pub fn print_grand_total(snap: &PortfolioSnapshot) {
     let total = snap.grand_total_eth_wei();
     println!(

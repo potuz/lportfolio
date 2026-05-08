@@ -198,8 +198,6 @@ async fn holdings_cmd(refresh: bool) -> Result<()> {
         println!("{}", render::render_csm(&snap.csm));
     }
 
-    render::print_section("Summary");
-    println!("{}", render::render_summary(&snap));
     render::print_grand_total(&snap);
     Ok(())
 }
