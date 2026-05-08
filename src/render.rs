@@ -9,6 +9,7 @@ use comfy_table::presets::UTF8_FULL;
 use crate::chain::Chain;
 use crate::decode::{Action, AssetAmount, DecodedTx, Direction};
 use crate::holdings::{CsmRow, NativeRow, PortfolioSnapshot, StakingRow, gwei_to_wei};
+use crate::prices::{PriceTable, u256_to_f64};
 
 pub mod paint {
     use super::*;
@@ -28,9 +29,6 @@ pub mod paint {
         }
     }
 
-    pub fn bold(s: &str) -> String {
-        wrap(s, "1")
-    }
     pub fn bold_green(s: &str) -> String {
         wrap(s, "1;32")
     }
@@ -411,7 +409,7 @@ fn meets_token_threshold(amount: U256, decimals: u8) -> bool {
     amount >= scale
 }
 
-pub fn render_native(rows: &[NativeRow], safes: &BTreeSet<String>) -> Table {
+pub fn render_native(rows: &[NativeRow], safes: &BTreeSet<String>, prices: &PriceTable) -> Table {
     let mut t = new_table();
 
     let present_chains: Vec<Chain> = Chain::ALL
@@ -470,7 +468,44 @@ pub fn render_native(rows: &[NativeRow], safes: &BTreeSet<String>) -> Table {
     total_cells.push(grand.render());
     t.add_row(total_cells);
 
+    if !prices.is_empty()
+        && let Some(eth_usd) = prices.lookup("ETH")
+    {
+        let mut usd_cells: Vec<String> = vec!["Total (USD)".into(), String::new()];
+        let mut grand_usd = 0.0;
+        for chain in &present_chains {
+            let agg = col_totals.get(chain).cloned().unwrap_or_default();
+            let usd = cell_usd(&agg, eth_usd, prices);
+            grand_usd += usd;
+            usd_cells.push(format_usd(usd));
+        }
+        usd_cells.push(format_usd(grand_usd));
+        t.add_row(usd_cells);
+    }
+
     t
+}
+
+pub fn format_usd(usd: f64) -> String {
+    let cents = (usd * 100.0).round() as i64;
+    let abs_cents = cents.abs();
+    let dollars = abs_cents / 100;
+    let frac = abs_cents % 100;
+    let sign = if cents < 0 { "-" } else { "" };
+    format!(
+        "{sign}${}.{frac:02}",
+        add_thousands_separators(&dollars.to_string())
+    )
+}
+
+fn cell_usd(agg: &CellAgg, eth_usd: f64, prices: &PriceTable) -> f64 {
+    let mut total = u256_to_f64(agg.native_wei, 18) * eth_usd;
+    for (sym, (amt, dec)) in &agg.tokens {
+        if let Some(p) = prices.lookup(sym) {
+            total += u256_to_f64(*amt, *dec) * p;
+        }
+    }
+    total
 }
 
 pub fn render_staking(rows: &[StakingRow]) -> Table {
@@ -507,23 +542,23 @@ pub fn render_csm(rows: &[CsmRow]) -> Table {
     t
 }
 
-/// Print the grand total after the holdings tables. ANSI escapes live here
-/// (outside any table) so cell-width math isn't fooled by escape bytes.
+/// Print the grand total in USD after the holdings tables. Includes native +
+/// ERC-20 + staking + CSM. Renders inside a unicode-bordered box for
+/// emphasis. ANSI escapes live outside any table cell so cell-width math
+/// isn't fooled by escape bytes.
 pub fn print_grand_total(snap: &PortfolioSnapshot) {
-    let total = snap.grand_total_eth_wei();
-    println!(
-        "{} {}",
-        paint::bold("Grand total:"),
-        paint::bold_green(&format!("{} ETH", format_eth_amount(total))),
-    );
-    let csm = snap.grand_total_steth_wei();
-    if !csm.is_zero() {
-        println!(
-            "{} {}",
-            paint::bold("CSM bond total:"),
-            paint::bold_green(&format!("{} stETH", format_eth_amount(csm))),
-        );
-    }
+    let body = match snap.grand_total_usd() {
+        Some(usd) => format!("Grand total:  {}", format_usd(usd)),
+        None => "Grand total:  (USD prices unavailable)".into(),
+    };
+    let inner_width = body.chars().count() + 4; // 2 spaces of padding on each side
+    let top = format!("╭{}╮", "─".repeat(inner_width));
+    let bot = format!("╰{}╯", "─".repeat(inner_width));
+    let middle = format!("│  {}  │", paint::bold_green(&body));
+    println!();
+    println!("{top}");
+    println!("{middle}");
+    println!("{bot}");
 }
 
 #[cfg(test)]

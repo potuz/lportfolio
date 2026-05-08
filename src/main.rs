@@ -8,6 +8,7 @@ mod decode;
 mod explorer;
 mod holdings;
 mod interactive;
+mod prices;
 mod render;
 mod rpc;
 mod staking;
@@ -186,7 +187,10 @@ async fn holdings_cmd(refresh: bool) -> Result<()> {
 
     if !snap.native.is_empty() {
         render::print_section("Native balances");
-        println!("{}", render::render_native(&snap.native, &cfg.safes));
+        println!(
+            "{}",
+            render::render_native(&snap.native, &cfg.safes, &snap.prices)
+        );
     }
 
     if !snap.staking.is_empty() {

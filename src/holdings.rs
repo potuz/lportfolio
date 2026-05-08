@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use alloy::primitives::{Address, U256};
@@ -8,6 +9,7 @@ use crate::chain::Chain;
 use crate::config::Config;
 use crate::csm::CsmReader;
 use crate::db::Db;
+use crate::prices::{PriceClient, PriceTable, u256_to_f64};
 use crate::rpc::ChainClient;
 use crate::staking::BeaconNodeClient;
 use crate::tokens;
@@ -50,26 +52,33 @@ pub struct PortfolioSnapshot {
     pub native: Vec<NativeRow>,
     pub staking: Vec<StakingRow>,
     pub csm: Vec<CsmRow>,
+    pub prices: PriceTable,
 }
 
 impl PortfolioSnapshot {
-    pub fn grand_total_eth_wei(&self) -> U256 {
-        let mut total = U256::ZERO;
-        for r in &self.native {
-            total += r.balance_wei;
+    /// Total USD value across native, staking (in ETH), and CSM (in stETH).
+    /// Returns `None` if no ETH price was fetched (in which case all ETH-based
+    /// totals are uncomputable).
+    pub fn grand_total_usd(&self) -> Option<f64> {
+        let eth_usd = self.prices.lookup("ETH")?;
+        let mut total = 0.0;
+        for row in &self.native {
+            total += u256_to_f64(row.balance_wei, 18) * eth_usd;
+            for tok in &row.tokens {
+                if let Some(p) = self.prices.lookup(&tok.display_symbol) {
+                    total += u256_to_f64(tok.amount, tok.decimals) * p;
+                }
+            }
         }
-        for r in &self.staking {
-            total += gwei_to_wei(r.total_balance_gwei);
+        for row in &self.staking {
+            total += (row.total_balance_gwei as f64) / 1e9 * eth_usd;
         }
-        total
-    }
-
-    pub fn grand_total_steth_wei(&self) -> U256 {
-        let mut total = U256::ZERO;
-        for r in &self.csm {
-            total += r.bond_steth_wei;
+        if let Some(steth) = self.prices.lookup("stETH") {
+            for row in &self.csm {
+                total += u256_to_f64(row.bond_steth_wei, 18) * steth;
+            }
         }
-        total
+        Some(total)
     }
 }
 
@@ -82,11 +91,53 @@ pub async fn build_snapshot(cfg: &Config, db: &mut Db, refresh: bool) -> Result<
     let native = collect_native(cfg).await?;
     let staking = collect_staking(cfg, db, refresh).await?;
     let csm = collect_csm(cfg).await?;
+    let prices = collect_prices(&native, &staking, &csm).await;
     Ok(PortfolioSnapshot {
         native,
         staking,
         csm,
+        prices,
     })
+}
+
+async fn collect_prices(
+    native: &[NativeRow],
+    staking: &[StakingRow],
+    csm: &[CsmRow],
+) -> PriceTable {
+    let mut symbols: BTreeSet<&str> = BTreeSet::new();
+    if !native.is_empty() || !staking.is_empty() {
+        symbols.insert("ETH");
+    }
+    if !csm.is_empty() {
+        symbols.insert("stETH");
+    }
+    for row in native {
+        for tok in &row.tokens {
+            symbols.insert(tok.display_symbol.as_str());
+        }
+    }
+    if symbols.is_empty() {
+        return PriceTable::default();
+    }
+    let client = match PriceClient::new() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "price client init failed; USD totals will be omitted: {:#}",
+                e
+            );
+            return PriceTable::default();
+        }
+    };
+    let owned: Vec<&str> = symbols.iter().copied().collect();
+    match client.fetch_for_symbols(&owned).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("price fetch failed; USD totals will be omitted: {:#}", e);
+            PriceTable::default()
+        }
+    }
 }
 
 async fn collect_native(cfg: &Config) -> Result<Vec<NativeRow>> {
@@ -225,25 +276,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grand_total_sums_native_and_staking() {
+    fn grand_total_usd_sums_native_staking_and_csm() {
+        let mut prices = PriceTable::default();
+        // Inject prices for the test by going through fetch_for_symbols mocking;
+        // simpler here: pre-populate via a small test-only constructor.
+        prices.insert_for_test("ETH", 4_000.0);
+        prices.insert_for_test("stETH", 4_010.0);
+
         let snap = PortfolioSnapshot {
             native: vec![NativeRow {
                 alias: "a".into(),
                 address: Address::default(),
                 chain: Chain::Mainnet,
-                balance_wei: U256::from(10u64).pow(U256::from(18)),
+                balance_wei: U256::from(10u64).pow(U256::from(18)), // 1 ETH
                 tokens: Vec::new(),
             }],
             staking: vec![StakingRow {
                 alias: "a".into(),
                 validator_count: 1,
-                total_balance_gwei: 32_000_000_000,
+                total_balance_gwei: 32_000_000_000, // 32 ETH
                 from_cache: false,
             }],
-            csm: vec![],
+            csm: vec![CsmRow {
+                operator_id: 1,
+                bond_steth_wei: U256::from(10u64).pow(U256::from(18)) * U256::from(2u64), // 2 stETH
+            }],
+            prices,
         };
-        let total = snap.grand_total_eth_wei();
-        let expected = U256::from(33u64) * U256::from(10u64).pow(U256::from(18));
-        assert_eq!(total, expected);
+        let usd = snap.grand_total_usd().unwrap();
+        // 1 ETH * $4000 + 32 ETH * $4000 + 2 stETH * $4010 = $4000 + $128000 + $8020 = $140020
+        assert!((usd - 140_020.0).abs() < 1e-6);
     }
 }
