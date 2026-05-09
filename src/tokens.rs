@@ -81,6 +81,42 @@ pub const REGISTRY: &[WhitelistedToken] = &[
         display_symbol: "DAI",
         decimals: 18,
     },
+    // -- Mainnet-only governance / yield tokens (often distributed via splits) --
+    WhitelistedToken {
+        whitelist_id: "EIGEN",
+        chain_id: 1,
+        address: address!("0xec53bF9167f50cDEB3Ae105f56099aaaB9061F83"),
+        display_symbol: "EIGEN",
+        decimals: 18,
+    },
+    WhitelistedToken {
+        whitelist_id: "PUFFER",
+        chain_id: 1,
+        address: address!("0x4d1C297d39C5c1277964D0E3f8Aa901493664530"),
+        display_symbol: "PUFFER",
+        decimals: 18,
+    },
+    WhitelistedToken {
+        whitelist_id: "SAFE",
+        chain_id: 1,
+        address: address!("0x5aFE3855358E112B5647B952709E6165e1c1eEEe"),
+        display_symbol: "SAFE",
+        decimals: 18,
+    },
+    WhitelistedToken {
+        whitelist_id: "ETHFI",
+        chain_id: 1,
+        address: address!("0xFe0c30065B384F05761f15d0CC899D4F9F9Cc0eB"),
+        display_symbol: "ETHFI",
+        decimals: 18,
+    },
+    WhitelistedToken {
+        whitelist_id: "STRK",
+        chain_id: 1,
+        address: address!("0xCa14007Eff0dB1f8135f4C25B34De49AB0d42766"),
+        display_symbol: "STRK",
+        decimals: 18,
+    },
 ];
 
 /// Returns the deployments matching `(chain_id, whitelist_id ∈ whitelist)`.

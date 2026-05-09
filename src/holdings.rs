@@ -11,6 +11,7 @@ use crate::csm::CsmReader;
 use crate::db::Db;
 use crate::prices::{PriceClient, PriceTable, u256_to_f64};
 use crate::rpc::ChainClient;
+use crate::splits::SplitsReader;
 use crate::staking::BeaconNodeClient;
 use crate::tokens;
 
@@ -47,11 +48,24 @@ pub struct CsmRow {
     pub bond_steth_wei: U256,
 }
 
+#[derive(Debug, Clone)]
+pub struct SplitsRow {
+    pub alias: String,
+    pub address: Address,
+    pub chain: Chain,
+    /// `None` ⇒ native ETH claim; `Some(addr)` ⇒ ERC-20 contract address.
+    pub token: Option<Address>,
+    pub display_symbol: String,
+    pub decimals: u8,
+    pub amount: U256,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PortfolioSnapshot {
     pub native: Vec<NativeRow>,
     pub staking: Vec<StakingRow>,
     pub csm: Vec<CsmRow>,
+    pub splits: Vec<SplitsRow>,
     pub prices: PriceTable,
 }
 
@@ -78,6 +92,15 @@ impl PortfolioSnapshot {
                 total += u256_to_f64(row.bond_steth_wei, 18) * steth;
             }
         }
+        for row in &self.splits {
+            let price = match row.token {
+                None => Some(eth_usd),
+                Some(_) => self.prices.lookup(&row.display_symbol),
+            };
+            if let Some(p) = price {
+                total += u256_to_f64(row.amount, row.decimals) * p;
+            }
+        }
         Some(total)
     }
 }
@@ -91,11 +114,13 @@ pub async fn build_snapshot(cfg: &Config, db: &mut Db, refresh: bool) -> Result<
     let native = collect_native(cfg).await?;
     let staking = collect_staking(cfg, db, refresh).await?;
     let csm = collect_csm(cfg).await?;
-    let prices = collect_prices(&native, &staking, &csm).await;
+    let splits = collect_splits(cfg).await?;
+    let prices = collect_prices(&native, &staking, &csm, &splits).await;
     Ok(PortfolioSnapshot {
         native,
         staking,
         csm,
+        splits,
         prices,
     })
 }
@@ -104,6 +129,7 @@ async fn collect_prices(
     native: &[NativeRow],
     staking: &[StakingRow],
     csm: &[CsmRow],
+    splits: &[SplitsRow],
 ) -> PriceTable {
     let mut symbols: BTreeSet<&str> = BTreeSet::new();
     if !native.is_empty() || !staking.is_empty() {
@@ -115,6 +141,13 @@ async fn collect_prices(
     for row in native {
         for tok in &row.tokens {
             symbols.insert(tok.display_symbol.as_str());
+        }
+    }
+    for row in splits {
+        if row.token.is_none() {
+            symbols.insert("ETH");
+        } else {
+            symbols.insert(row.display_symbol.as_str());
         }
     }
     if symbols.is_empty() {
@@ -271,6 +304,61 @@ async fn collect_csm(cfg: &Config) -> Result<Vec<CsmRow>> {
         .collect())
 }
 
+async fn collect_splits(cfg: &Config) -> Result<Vec<SplitsRow>> {
+    let mut rows = Vec::new();
+    for (chain, cc) in &cfg.chains {
+        let Some(reader) = SplitsReader::connect(chain.id(), &cc.rpc_url)? else {
+            continue; // warehouse not deployed on this chain
+        };
+
+        for (alias, addr) in &cfg.addresses {
+            // Native ETH claim.
+            match reader.balance(*addr, None).await {
+                Ok(amount) if !amount.is_zero() => rows.push(SplitsRow {
+                    alias: alias.clone(),
+                    address: *addr,
+                    chain: *chain,
+                    token: None,
+                    display_symbol: "ETH".into(),
+                    decimals: 18,
+                    amount,
+                }),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    alias,
+                    chain = chain.name(),
+                    "splits native claim fetch failed; skipping: {:#}",
+                    e
+                ),
+            }
+
+            // Whitelisted ERC-20 claims.
+            for deployment in tokens::deployments_for(chain.id(), &cfg.token_whitelist) {
+                match reader.balance(*addr, Some(deployment.address)).await {
+                    Ok(amount) if !amount.is_zero() => rows.push(SplitsRow {
+                        alias: alias.clone(),
+                        address: *addr,
+                        chain: *chain,
+                        token: Some(deployment.address),
+                        display_symbol: deployment.display_symbol.to_string(),
+                        decimals: deployment.decimals,
+                        amount,
+                    }),
+                    Ok(_) => {}
+                    Err(e) => warn!(
+                        alias,
+                        chain = chain.name(),
+                        token = deployment.display_symbol,
+                        "splits ERC-20 claim fetch failed; skipping: {:#}",
+                        e
+                    ),
+                }
+            }
+        }
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,10 +389,48 @@ mod tests {
                 operator_id: 1,
                 bond_steth_wei: U256::from(10u64).pow(U256::from(18)) * U256::from(2u64), // 2 stETH
             }],
+            splits: Vec::new(),
             prices,
         };
         let usd = snap.grand_total_usd().unwrap();
         // 1 ETH * $4000 + 32 ETH * $4000 + 2 stETH * $4010 = $4000 + $128000 + $8020 = $140020
         assert!((usd - 140_020.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn grand_total_usd_includes_splits_claims() {
+        let mut prices = PriceTable::default();
+        prices.insert_for_test("ETH", 4_000.0);
+        prices.insert_for_test("USDC", 1.0);
+
+        let snap = PortfolioSnapshot {
+            native: Vec::new(),
+            staking: Vec::new(),
+            csm: Vec::new(),
+            splits: vec![
+                SplitsRow {
+                    alias: "a".into(),
+                    address: Address::default(),
+                    chain: Chain::Mainnet,
+                    token: None,
+                    display_symbol: "ETH".into(),
+                    decimals: 18,
+                    amount: U256::from(10u64).pow(U256::from(18)) / U256::from(2u64), // 0.5 ETH
+                },
+                SplitsRow {
+                    alias: "a".into(),
+                    address: Address::default(),
+                    chain: Chain::Mainnet,
+                    token: Some(Address::default()),
+                    display_symbol: "USDC".into(),
+                    decimals: 6,
+                    amount: U256::from(100_000_000u64), // 100 USDC
+                },
+            ],
+            prices,
+        };
+        let usd = snap.grand_total_usd().unwrap();
+        // 0.5 * $4000 + 100 * $1 = $2100
+        assert!((usd - 2_100.0).abs() < 1e-6);
     }
 }

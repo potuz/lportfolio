@@ -11,6 +11,7 @@ mod interactive;
 mod prices;
 mod render;
 mod rpc;
+mod splits;
 mod staking;
 mod sync;
 mod tokens;
@@ -201,6 +202,11 @@ async fn holdings_cmd(refresh: bool) -> Result<()> {
     if !snap.csm.is_empty() {
         render::print_section("Lido CSM bonds");
         println!("{}", render::render_csm(&snap.csm));
+    }
+
+    if !snap.splits.is_empty() {
+        render::print_section("Splits claims");
+        println!("{}", render::render_splits(&snap.splits, &snap.prices));
     }
 
     render::print_grand_total(&snap);

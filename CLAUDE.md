@@ -36,6 +36,8 @@ src/
   explorer.rs        Etherscan v2 client (throttled + retries)
   staking.rs         BeaconNodeClient — direct Beacon API call to local node
   csm.rs             Lido CSM bond reader (alloy::sol! ABI on CSAccounting)
+  splits.rs          Splits V2 claimable balance reader
+                     (warehouse.balanceOf for native + whitelisted ERC-20s)
   tokens.rs          Hardcoded ERC-20 whitelist registry: (whitelist_id,
                      chain, address, display_symbol, decimals)
   holdings.rs        PortfolioSnapshot aggregator + build_snapshot()
@@ -52,8 +54,12 @@ src/
 ## Architectural conventions
 
 - **All network I/O is behind a small struct/trait** (`ChainClient`,
-  `Explorer`, `BeaconNodeClient`, `CsmReader`). Tests use recorded fixtures,
-  never live network.
+  `Explorer`, `BeaconNodeClient`, `CsmReader`, `SplitsReader`). Tests use
+  recorded fixtures, never live network.
+- **`decode/splits.rs` vs `splits.rs` are intentionally separate.** The
+  former is a transaction-history decoder (matches by contract address in
+  past txs); the latter is a current-state reader (`eth_call` on
+  SplitsWarehouse for claimable balances). Same protocol, two read paths.
 - **Decoders are pluggable.** `ContractDecoder::matches(chain_id, to)` +
   `decode(tx, logs)`. The `Registry` walks decoders in order; the first match
   wins. Add a new protocol by adding a file under `src/decode/` and registering

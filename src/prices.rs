@@ -18,6 +18,11 @@ const SYMBOL_TO_ID: &[(&str, &str)] = &[
     ("USDT0", "tether"),
     ("ARB", "arbitrum"),
     ("DAI", "dai"),
+    ("EIGEN", "eigenlayer"),
+    ("PUFFER", "puffer-finance"),
+    ("SAFE", "safe"),
+    ("ETHFI", "ether-fi"),
+    ("STRK", "starknet"),
 ];
 
 #[derive(Debug, Clone, Default)]

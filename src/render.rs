@@ -8,7 +8,7 @@ use comfy_table::presets::UTF8_FULL;
 
 use crate::chain::Chain;
 use crate::decode::{Action, AssetAmount, DecodedTx, Direction};
-use crate::holdings::{CsmRow, NativeRow, PortfolioSnapshot, StakingRow, gwei_to_wei};
+use crate::holdings::{CsmRow, NativeRow, PortfolioSnapshot, SplitsRow, StakingRow, gwei_to_wei};
 use crate::prices::{PriceTable, u256_to_f64};
 
 pub mod paint {
@@ -539,6 +539,78 @@ pub fn render_csm(rows: &[CsmRow]) -> Table {
             format!("{} stETH", format_eth_amount(r.bond_steth_wei)),
         ]);
     }
+    t
+}
+
+pub fn render_splits(rows: &[SplitsRow], prices: &PriceTable) -> Table {
+    let mut t = new_table();
+
+    let present_chains: Vec<Chain> = Chain::ALL
+        .iter()
+        .copied()
+        .filter(|c| rows.iter().any(|r| r.chain == *c))
+        .collect();
+
+    let mut header_cells: Vec<&str> = vec!["Alias", "Address"];
+    for chain in &present_chains {
+        header_cells.push(chain.name());
+    }
+    header_cells.push("Total");
+    t.set_header(header_row(&header_cells));
+
+    let mut grouped: BTreeMap<(String, Address), BTreeMap<Chain, CellAgg>> = BTreeMap::new();
+    for r in rows {
+        let cell = grouped
+            .entry((r.alias.clone(), r.address))
+            .or_default()
+            .entry(r.chain)
+            .or_default();
+        match r.token {
+            None => cell.add_native(r.amount),
+            Some(_) => cell.add_token(&r.display_symbol, r.amount, r.decimals),
+        }
+    }
+
+    let mut col_totals: BTreeMap<Chain, CellAgg> = BTreeMap::new();
+    let mut grand = CellAgg::default();
+
+    for ((alias, address), per_chain) in &grouped {
+        let mut cells: Vec<String> = vec![alias.clone(), format!("{address:#x}")];
+        let mut row_total = CellAgg::default();
+        for chain in &present_chains {
+            let cell = per_chain.get(chain).cloned().unwrap_or_default();
+            row_total.merge(&cell);
+            col_totals.entry(*chain).or_default().merge(&cell);
+            cells.push(cell.render());
+        }
+        grand.merge(&row_total);
+        cells.push(row_total.render());
+        t.add_row(cells);
+    }
+
+    let mut total_cells: Vec<String> = vec!["Total".into(), String::new()];
+    for chain in &present_chains {
+        let agg = col_totals.get(chain).cloned().unwrap_or_default();
+        total_cells.push(agg.render());
+    }
+    total_cells.push(grand.render());
+    t.add_row(total_cells);
+
+    if !prices.is_empty()
+        && let Some(eth_usd) = prices.lookup("ETH")
+    {
+        let mut usd_cells: Vec<String> = vec!["Total (USD)".into(), String::new()];
+        let mut grand_usd = 0.0;
+        for chain in &present_chains {
+            let agg = col_totals.get(chain).cloned().unwrap_or_default();
+            let usd = cell_usd(&agg, eth_usd, prices);
+            grand_usd += usd;
+            usd_cells.push(format_usd(usd));
+        }
+        usd_cells.push(format_usd(grand_usd));
+        t.add_row(usd_cells);
+    }
+
     t
 }
 
