@@ -4,14 +4,30 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[lib]
+name = "lportfolio"
+# cdylib is needed for the Android NativeActivity entry point. rlib is needed
+# for the desktop CLI binary. Listing both is harmless on desktop — the unused
+# .so is produced alongside the rlib.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "lportfolio"
+path = "src/bin/lportfolio.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:clap_complete", "dep:comfy-table", "dep:dotenvy", "dep:tracing-subscriber"]
+
 [dependencies]
 alloy = { version = "=1.8.3", default-features = false, features = ["std", "rpc-client", "transports", "transport-http", "reqwest-rustls-tls", "providers", "contract", "sol-types"] }
 anyhow = "=1.0.102"
-clap = { version = "=4.6.1", features = ["derive"] }
-clap_complete = "=4.6.3"
-comfy-table = { version = "=7.2.2", default-features = false }
+clap = { version = "=4.6.1", features = ["derive"], optional = true }
+clap_complete = { version = "=4.6.3", optional = true }
+comfy-table = { version = "=7.2.2", default-features = false, optional = true }
 dirs = "=6.0.0"
-dotenvy = "=0.15.7"
+dotenvy = { version = "=0.15.7", optional = true }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -20,9 +36,32 @@ thiserror = "=2.0.18"
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "time"] }
 toml = "=0.9.12"
 tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"], optional = true }
+
+# Android UI deps. Pulled in only when cross-compiling to an Android target;
+# absent from the desktop CLI build graph.
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "=0.34.2", default-features = false, features = ["default_fonts", "glow", "android-native-activity"] }
+egui = { version = "=0.34.2", default-features = false }
+# winit is pulled in transitively by eframe; pinned directly so the
+# `android_main` entry point can name `AndroidApp` without going through
+# eframe re-exports.
+winit = { version = "=0.30.13", default-features = false, features = ["android-native-activity"] }
+log = "=0.4.29"
+android_logger = "=0.15.1"
+
+# Replace the upstream `rustls-platform-verifier` with a webpki-roots-only
+# implementation so the Android build does not require the Kotlin/Java
+# `CertificateVerifier` shim. Trade-off: the app trusts Mozilla's CA bundle
+# on every platform rather than the device's user-installed roots.
+[patch.crates-io]
+rustls-platform-verifier = { path = "crates/rustls-platform-verifier-webpki" }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Note: Android packaging metadata lives in `manifest.yaml` at the project
+# root (read by `xbuild`). `[package.metadata.android]` is the cargo-apk
+# convention and is silently ignored by xbuild, so it is not used here.

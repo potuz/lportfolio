@@ -3,21 +3,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Serialize,
-    Deserialize,
-    clap::ValueEnum,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
-#[clap(rename_all = "lower")]
+#[cfg_attr(feature = "cli", clap(rename_all = "lower"))]
 pub enum Chain {
     Mainnet,
     Arbitrum,

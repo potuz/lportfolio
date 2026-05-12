@@ -18,7 +18,11 @@ These are user-imposed and non-negotiable without asking first:
   `= "x.y.z"` in `Cargo.toml` (not `^` or `~`). Commit `Cargo.lock`. The
   motivation is supply-chain attack surface — every new crate must be
   justified.
-- **No `unsafe`.** `#![forbid(unsafe_code)]` lives at the crate root.
+- **No `unsafe`.** The library crate uses `#![deny(unsafe_code)]` at the root
+  and the CLI binary uses `#![forbid(unsafe_code)]`. The Android NativeActivity
+  entry point in `src/android/entry.rs` has a file-local
+  `#![allow(unsafe_code)]` to permit `#[unsafe(no_mangle)]` on `android_main`;
+  no `unsafe` blocks exist anywhere.
 - **Secrets stay in `.env`** (gitignored). Never log addresses' API keys, never
   commit a real `.env`. `.env.example` is the template.
 - **Build with `--locked`.** `cargo build --locked` and `cargo test --locked`
@@ -26,12 +30,18 @@ These are user-imposed and non-negotiable without asking first:
 
 ## Repository layout
 
+The crate is structured as a library plus two consumers: the desktop CLI
+binary (`src/bin/lportfolio.rs`) and, when cross-compiling to Android, an
+egui-based GUI exposed as a `cdylib` (`src/android/`).
+
 ```
 src/
-  main.rs            clap entry, subcommand wiring, pipe-friendly panic hook
-  config.rs          .env loader (addresses, chains, RPCs, beacon, validators,
-                     CSM op IDs, token whitelist)
-  chain.rs           Chain enum + chain metadata
+  lib.rs             portable core; re-exports the modules below
+  bin/
+    lportfolio.rs    CLI: clap entry, subcommand wiring, pipe-friendly hook
+  config.rs          .env loader (cli only) + TOML codec (Config::{from_toml,
+                     to_toml, empty}) used by the Android app
+  chain.rs           Chain enum + metadata (clap::ValueEnum derive cfg'd on cli)
   rpc.rs             ChainClient: native balance, ERC-20 balanceOf, retries
   explorer.rs        Etherscan v2 client (throttled + retries)
   staking.rs         BeaconNodeClient — direct Beacon API call to local node
@@ -43,12 +53,52 @@ src/
   holdings.rs        PortfolioSnapshot aggregator + build_snapshot()
   db.rs              rusqlite schema, migrations, queries
   sync.rs            incremental sync orchestration
-  render.rs          comfy-table rendering + paint module (ANSI colors)
+  portfolio_view.rs  CellAgg + format_amount_compact / format_usd / pivot
+                     helpers shared by CLI render.rs and Android holdings.rs
+  render.rs          comfy-table rendering + paint module (cli feature only)
   interactive.rs     unknown-contract tagging flow
   decode/
     mod.rs           ContractDecoder trait + Registry
     erc20.rs         generic ERC-20 transfers (default fallback)
     lido.rs aave.rs uniswap.rs cowswap.rs across.rs splits.rs
+  android/           cfg(target_os = "android") only — the egui frontend
+    mod.rs
+    entry.rs         android_main NativeActivity entry point
+    app.rs           eframe::App impl, tokio runtime, snapshot channel
+    data_dir.rs      OnceLock holding app-private storage path (set from
+                     android_main via AndroidApp::internal_data_path)
+    screens/
+      mod.rs
+      settings.rs    form for addresses/RPCs/beacon/CSM/tokens/safes; saves
+                     to TOML via Config::to_toml
+      holdings.rs    refresh button + egui grids for the snapshot tables
+```
+
+### Feature flags
+
+- `cli` (default): the desktop binary and the comfy-table renderer.
+- No feature flag is needed for the Android build — the entire `android`
+  module tree is gated on `cfg(target_os = "android")`, and the Android UI
+  deps (`eframe`, `egui`, `winit`, `log`, `android_logger`) live under
+  `[target.'cfg(target_os = "android")'.dependencies]` so they never enter
+  the desktop build graph.
+
+### Cross-compile build commands
+
+```
+# desktop CLI (unchanged)
+cargo build  --locked
+cargo test   --locked
+cargo clippy --locked --all-targets -- -D warnings
+
+# Android cdylib — requires the aarch64-linux-android target and an
+# NDK-provided clang on PATH (typically via xbuild or cargo-ndk)
+rustup target add aarch64-linux-android
+cargo build  --locked --no-default-features --target aarch64-linux-android
+
+# Package an APK and install on a USB- or wifi-attached device
+x build --platform android --arch arm64
+adb install -r target/x/debug/android/lportfolio.apk
 ```
 
 ## Architectural conventions

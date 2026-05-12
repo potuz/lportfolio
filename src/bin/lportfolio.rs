@@ -1,33 +1,17 @@
 #![forbid(unsafe_code)]
 
-mod chain;
-mod config;
-mod csm;
-mod db;
-mod decode;
-mod explorer;
-mod holdings;
-mod interactive;
-mod prices;
-mod render;
-mod rpc;
-mod splits;
-mod staking;
-mod sync;
-mod tokens;
-
 use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use comfy_table::Table;
-
-use crate::chain::Chain;
-use crate::config::Config;
-use crate::db::Db;
-use crate::decode::Registry;
-use crate::explorer::Explorer;
+use lportfolio::chain::Chain;
+use lportfolio::config::Config;
+use lportfolio::db::Db;
+use lportfolio::decode::Registry;
+use lportfolio::explorer::Explorer;
+use lportfolio::{holdings, interactive, render, sync};
 
 #[derive(Parser)]
 #[command(

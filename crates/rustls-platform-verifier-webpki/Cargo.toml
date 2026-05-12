@@ -1,0 +1,10 @@
+[package]
+name = "rustls-platform-verifier"
+version = "0.7.0"
+edition = "2021"
+publish = false
+description = "Local override: replaces rustls-platform-verifier with a webpki-roots-only implementation so Android builds do not require JNI initialization. Public API is reduced to what reqwest 0.13 calls."
+
+[dependencies]
+rustls = { version = "=0.23.40", default-features = false }
+webpki-roots = "=1.0.7"
