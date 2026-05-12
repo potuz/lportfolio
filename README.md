@@ -1,5 +1,8 @@
 # lportfolio
 
+> [!WARNING]
+> Completely vibecoded — not a single line of code was read by a human.
+
 A local Ethereum portfolio tracker. Ingests a list of user-owned addresses
 across mainnet + a handful of L2s, queries JSON-RPC + a Beacon node + a
 block explorer, persists everything to a local SQLite cache, and renders
@@ -235,5 +238,4 @@ Android cdylib.
 
 ## License
 
-This repository is not currently licensed for redistribution. Please ask the
-author if you want to use any part of it.
+MIT — see [LICENSE](LICENSE).
