@@ -10,11 +10,12 @@ use crate::chain::Chain;
 use crate::config::Config;
 use crate::db::Db;
 
-/// L2-aware Universal Resolver deployment on Ethereum mainnet. Its
-/// `reverse(bytes)` method performs forward-verification internally — the
-/// returned name is empty when no record exists or when forward
-/// verification fails.
-const UNIVERSAL_RESOLVER: Address = address!("0xce01f8eee7E479C928F8919abD53E553a36CeF67");
+/// Universal Resolver on Ethereum mainnet (matches the constant in
+/// `alloy-ens` 2.0.4). Its `reverse(bytes)` performs forward verification
+/// internally — name is empty when no record exists or when forward
+/// verification fails; reverts deterministically when no resolver exists
+/// for the address's reverse node.
+const UNIVERSAL_RESOLVER: Address = address!("0xeeeeeeee14d718c2b47d9923deab1335e144eeee");
 
 const MAX_RETRIES: u32 = 2;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(400);
