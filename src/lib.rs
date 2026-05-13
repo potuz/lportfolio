@@ -8,6 +8,7 @@ pub mod config;
 pub mod csm;
 pub mod db;
 pub mod decode;
+pub mod ens;
 pub mod explorer;
 pub mod holdings;
 pub mod interactive;

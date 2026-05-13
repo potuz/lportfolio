@@ -11,7 +11,7 @@ use lportfolio::config::Config;
 use lportfolio::db::Db;
 use lportfolio::decode::Registry;
 use lportfolio::explorer::Explorer;
-use lportfolio::{holdings, interactive, render, sync};
+use lportfolio::{ens, holdings, interactive, render, sync};
 
 #[derive(Parser)]
 #[command(
@@ -259,6 +259,21 @@ async fn sync_cmd(chain_filter: Option<Chain>, alias_filter: Option<String>) -> 
         }
     }
     println!("{table}");
+
+    // Best-effort ENS pass over all unresolved counterparties in the DB.
+    // Failures here are logged but never abort sync — the Etherscan data
+    // is the load-bearing artifact.
+    let owned: Vec<Address> = cfg.addresses.values().copied().collect();
+    match ens::resolve_pending(&mut db, &cfg, &owned).await {
+        Ok(s) if s.resolved + s.miss + s.errored > 0 => {
+            println!(
+                "\nENS: {} resolved, {} miss, {} errored",
+                s.resolved, s.miss, s.errored,
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("ENS pass skipped: {e:#}"),
+    }
     Ok(())
 }
 
@@ -294,6 +309,16 @@ fn history_cmd(
         labels
             .entry((known.chain_id, known.address))
             .or_insert_with(|| known.label.to_string());
+    }
+    // ENS overlay — lowest priority. Canonical mainnet reverse applies to
+    // every chain, so the same name is inserted once per Chain::ALL entry.
+    let ens_names = db.ens_load_all()?;
+    for chain in Chain::ALL {
+        for (addr, name) in &ens_names {
+            labels
+                .entry((chain.id(), *addr))
+                .or_insert_with(|| name.clone());
+        }
     }
     let history = db.query_history(&registry, &addresses, chain_filter)?;
 
@@ -335,12 +360,14 @@ fn unknowns_cmd(chain_filter: Option<Chain>) -> Result<()> {
         .into_iter()
         .map(|k| (k.chain_id, k.address))
         .collect();
+    let ens_hits = db.ens_resolved_addresses()?;
 
     let unlabeled: Vec<_> = counterparties
         .into_iter()
         .filter(|c| {
             !known_labels.contains_key(&(c.chain_id, c.address))
                 && !registry_known.contains(&(c.chain_id, c.address))
+                && !ens_hits.contains(&c.address)
         })
         .collect();
 

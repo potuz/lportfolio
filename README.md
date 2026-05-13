@@ -184,6 +184,32 @@ Install shell completions:
 lportfolio completions bash > ~/.local/share/bash-completion/completions/lportfolio
 ```
 
+## ENS reverse-resolution
+
+`lportfolio sync` runs a best-effort ENS reverse-resolution pass after the
+Etherscan pulls finish, using the configured `LPORTFOLIO_RPC_MAINNET`
+endpoint and the Universal Resolver contract. Results — both hits and
+confirmed misses — land in the `ens_cache` table and are reused for every
+subsequent `lportfolio history` and `lportfolio unknowns`, so each address
+is queried at most once.
+
+- Canonical ENS reverse lives on mainnet only, so the cache has no
+  `chain_id` column. The same name renders for an address regardless of
+  which chain its transactions appeared on.
+- ENS names show in `history` only when nothing higher-priority is
+  available: alias > manual `lportfolio tag` label > decoder-supplied
+  registry label > **ENS name** > short-hex fallback.
+- `unknowns` hides counterparties that successfully reverse-resolved; only
+  manually-meaningful ones surface.
+- No TTL — entries stay cached forever. To force a re-resolution, delete
+  the row:
+
+  ```bash
+  sqlite3 ~/.local/share/lportfolio/db.sqlite \
+      "DELETE FROM ens_cache WHERE address = '0xdeadbeef...';"
+  lportfolio sync
+  ```
+
 ## Android app
 
 Only the `holdings` view is ported. The app has two screens:

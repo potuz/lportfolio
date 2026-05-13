@@ -94,6 +94,18 @@ CREATE TABLE IF NOT EXISTS staking_snapshot (
     total_balance_gwei INTEGER NOT NULL,
     fetched_at         INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+-- v2: ENS reverse-resolution cache. Canonical ENS reverse is mainnet-only,
+-- so no chain_id column. NULL ens_name caches a confirmed miss (no reverse
+-- record); a row with non-null ens_name caches a hit. Transient RPC errors
+-- are not cached and retry on the next sync.
+CREATE TABLE IF NOT EXISTS ens_cache (
+    address     TEXT PRIMARY KEY,
+    ens_name    TEXT,
+    resolved_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (2);
 "#;
 
 pub struct Db {
@@ -117,6 +129,14 @@ pub struct UnknownCounterparty {
 pub struct CachedStakingSummary {
     pub validator_count: u64,
     pub total_balance_gwei: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnsCacheRow {
+    pub address: Address,
+    /// `None` represents a cached confirmed miss (no reverse record).
+    pub ens_name: Option<String>,
+    pub resolved_at: u64,
 }
 
 impl Db {
@@ -426,6 +446,120 @@ impl Db {
         Ok(out)
     }
 
+    /// `Some(row)` when we have a cached resolution (hit or miss).
+    /// `None` when the address has never been resolved.
+    pub fn ens_lookup(&self, addr: Address) -> Result<Option<EnsCacheRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT address, ens_name, resolved_at FROM ens_cache WHERE address = ?1")?;
+        let row = stmt
+            .query_row(params![addr_to_db(addr)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .optional()?;
+        match row {
+            None => Ok(None),
+            Some((addr_str, ens_name, resolved_at)) => {
+                let address = addr_str
+                    .parse::<Address>()
+                    .with_context(|| format!("malformed ens_cache.address {addr_str:?}"))?;
+                Ok(Some(EnsCacheRow {
+                    address,
+                    ens_name,
+                    resolved_at: resolved_at as u64,
+                }))
+            }
+        }
+    }
+
+    /// Upsert a resolution result. `ens_name = Some(name)` for hits,
+    /// `None` for confirmed misses.
+    pub fn ens_upsert(&mut self, addr: Address, ens_name: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO ens_cache (address, ens_name, resolved_at)
+                 VALUES (?1, ?2, strftime('%s','now'))
+             ON CONFLICT(address) DO UPDATE
+                 SET ens_name    = excluded.ens_name,
+                     resolved_at = excluded.resolved_at",
+            params![addr_to_db(addr), ens_name],
+        )?;
+        Ok(())
+    }
+
+    /// Distinct counterparty addresses appearing in `transactions` or
+    /// `transfers` that have no `ens_cache` row yet, excluding the user's
+    /// own addresses.
+    pub fn ens_pending(&self, owned: &[Address]) -> Result<Vec<Address>> {
+        let owned_db: Vec<String> = owned.iter().copied().map(addr_to_db).collect();
+        let owned_in = if owned_db.is_empty() {
+            "''".to_string()
+        } else {
+            vec!["?"; owned_db.len()].join(",")
+        };
+
+        let sql = format!(
+            "SELECT DISTINCT addr FROM (
+                 SELECT to_addr   AS addr FROM transactions WHERE to_addr   IS NOT NULL
+                 UNION
+                 SELECT from_addr AS addr FROM transactions
+                 UNION
+                 SELECT to_addr   AS addr FROM transfers
+                 UNION
+                 SELECT from_addr AS addr FROM transfers
+             )
+             WHERE addr IS NOT NULL
+               AND addr NOT IN (SELECT address FROM ens_cache)
+               AND addr NOT IN ({owned_in})"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(owned_db.iter()), |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let s = row?;
+            if let Ok(addr) = s.parse::<Address>() {
+                out.push(addr);
+            }
+        }
+        Ok(out)
+    }
+
+    /// All positive resolutions for the render path. Misses are excluded.
+    pub fn ens_load_all(&self) -> Result<BTreeMap<Address, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT address, ens_name FROM ens_cache WHERE ens_name IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (addr_str, name) = row?;
+            if let Ok(addr) = addr_str.parse::<Address>() {
+                out.insert(addr, name);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Addresses with a positive ENS hit, for filtering the unknowns view.
+    pub fn ens_resolved_addresses(&self) -> Result<HashSet<Address>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT address FROM ens_cache WHERE ens_name IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = HashSet::new();
+        for row in rows {
+            let s = row?;
+            if let Ok(addr) = s.parse::<Address>() {
+                out.insert(addr);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn query_history(
         &self,
         registry: &Registry,
@@ -604,9 +738,9 @@ mod tests {
 
         let version: i64 = db
             .conn
-            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         std::fs::remove_file(&tmp).ok();
     }
@@ -670,6 +804,115 @@ mod tests {
             .query_history(&registry, &[addr], Some(Chain::Mainnet))
             .unwrap();
         assert_eq!(history.len(), 2);
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn ens_cache_roundtrip() {
+        let tmp = tmp_path("enscache");
+        let _ = std::fs::remove_file(&tmp);
+        let mut db = Db::open_at(&tmp).unwrap();
+
+        let hit: Address = "0xd8da6bf26964af9d7eed9e03e53415d37aa96045"
+            .parse()
+            .unwrap();
+        let miss: Address = "0x0000000000000000000000000000000000000099"
+            .parse()
+            .unwrap();
+
+        db.ens_upsert(hit, Some("vitalik.eth")).unwrap();
+        db.ens_upsert(miss, None).unwrap();
+
+        let hit_row = db.ens_lookup(hit).unwrap().expect("hit cached");
+        assert_eq!(hit_row.ens_name.as_deref(), Some("vitalik.eth"));
+        let miss_row = db.ens_lookup(miss).unwrap().expect("miss cached");
+        assert!(miss_row.ens_name.is_none());
+        assert!(
+            db.ens_lookup(
+                "0x0000000000000000000000000000000000000fff"
+                    .parse()
+                    .unwrap()
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let all = db.ens_load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.get(&hit).map(String::as_str), Some("vitalik.eth"));
+
+        let resolved = db.ens_resolved_addresses().unwrap();
+        assert!(resolved.contains(&hit));
+        assert!(!resolved.contains(&miss));
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn ens_pending_excludes_cached_and_owned() {
+        let tmp = tmp_path("enspending");
+        let _ = std::fs::remove_file(&tmp);
+        let mut db = Db::open_at(&tmp).unwrap();
+
+        let owned: Address = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        let c1: Address = "0x0000000000000000000000000000000000000002"
+            .parse()
+            .unwrap();
+        let c2: Address = "0x0000000000000000000000000000000000000003"
+            .parse()
+            .unwrap();
+        let c3: Address = "0x0000000000000000000000000000000000000004"
+            .parse()
+            .unwrap();
+
+        db.upsert_address("alice", owned).unwrap();
+        let txs = vec![
+            EtherscanTx {
+                block_number: 100,
+                timestamp: 1_700_000_000,
+                hash: "0xaaa".into(),
+                from: format!("{owned:#x}"),
+                to: format!("{c1:#x}"),
+                value: "0".into(),
+                input: "0x".into(),
+                receipt_status: "1".into(),
+                is_error: "0".into(),
+            },
+            EtherscanTx {
+                block_number: 101,
+                timestamp: 1_700_000_100,
+                hash: "0xbbb".into(),
+                from: format!("{c2:#x}"),
+                to: format!("{owned:#x}"),
+                value: "0".into(),
+                input: "0x".into(),
+                receipt_status: "1".into(),
+                is_error: "0".into(),
+            },
+        ];
+        let token_txs = vec![EtherscanTokenTx {
+            block_number: 102,
+            timestamp: 1_700_000_200,
+            hash: "0xccc".into(),
+            contract_address: "0x000000000000000000000000000000000000abcd".into(),
+            from: format!("{c3:#x}"),
+            to: format!("{owned:#x}"),
+            value: "0".into(),
+            token_symbol: "USDC".into(),
+            token_decimal: 6,
+        }];
+        db.record_sync(Chain::Mainnet, owned, &txs, &token_txs)
+            .unwrap();
+
+        db.ens_upsert(c1, Some("c1.eth")).unwrap();
+        db.ens_upsert(c2, None).unwrap();
+
+        let mut pending = db.ens_pending(&[owned]).unwrap();
+        pending.sort();
+        assert_eq!(pending, vec![c3]);
+
         std::fs::remove_file(&tmp).ok();
     }
 }
