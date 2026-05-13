@@ -147,16 +147,18 @@ fn format_action(
             direction,
             counterparty,
             token,
-            symbol,
+            symbol: _,
             decimals,
             amount,
         } => {
             let display_amount = format_token_amount(*amount, *decimals);
-            let display_symbol = if symbol.is_empty() {
-                short_addr(*token)
-            } else {
-                symbol.clone()
-            };
+            // Never trust the on-chain `symbol()` — scammers deploy tokens
+            // that impersonate well-known symbols (ETH, USDC, …) to make
+            // poisoned rows look legitimate. Only use the symbol when the
+            // contract is in our hardcoded REGISTRY; otherwise show the
+            // short token address (hyperlinked) so the user can verify on
+            // the block explorer.
+            let display_symbol = display_token_identifier(*token, chain_id);
             let cp = display_address(*counterparty, chain_id, aliases, labels);
             match direction {
                 Direction::Out => format!("Sent {display_amount} {display_symbol} to {cp}"),
@@ -185,19 +187,19 @@ fn format_action(
             let sent_part = if sent.is_empty() {
                 String::new()
             } else {
-                format!(" sent {}", join_assets(sent))
+                format!(" sent {}", join_assets(sent, chain_id))
             };
             let recv_part = if received.is_empty() {
                 String::new()
             } else {
-                format!(" received {}", join_assets(received))
+                format!(" received {}", join_assets(received, chain_id))
             };
             format!("{header}{sent_part}{recv_part}")
         }
     }
 }
 
-fn join_assets(items: &[AssetAmount]) -> String {
+fn join_assets(items: &[AssetAmount], chain_id: u64) -> String {
     items
         .iter()
         .map(|a| {
@@ -205,18 +207,34 @@ fn join_assets(items: &[AssetAmount]) -> String {
                 None => format_eth_amount(a.amount),
                 Some(_) => format_token_amount(a.amount, a.decimals),
             };
-            let symbol = if a.symbol.is_empty() {
-                match a.token {
-                    None => "ETH".to_string(),
-                    Some(addr) => short_addr(addr),
-                }
-            } else {
-                a.symbol.clone()
+            // Native ETH is trusted by definition; ERC-20 symbols are not.
+            let symbol = match a.token {
+                None => "ETH".to_string(),
+                Some(addr) => display_token_identifier(addr, chain_id),
             };
             format!("{display_amount} {symbol}")
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Render a token contract's identifier — the canonical symbol from
+/// `tokens::REGISTRY` if we recognize the contract, otherwise the short
+/// form of the contract address — wrapped in an OSC 8 hyperlink to the
+/// chain's block explorer. Protects against scammers whose contracts
+/// claim to be well-known tokens via `symbol()`.
+fn display_token_identifier(addr: Address, chain_id: u64) -> String {
+    let text = match crate::tokens::trusted_symbol_for(chain_id, addr) {
+        Some(sym) => sym.to_string(),
+        None => short_addr(addr),
+    };
+    match Chain::from_id(chain_id) {
+        Some(chain) => paint::hyperlink(
+            &text,
+            &format!("{}/address/{:#x}", chain.explorer_url(), addr),
+        ),
+        None => text,
+    }
 }
 
 fn display_address(

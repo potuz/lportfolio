@@ -143,3 +143,14 @@ pub fn whitelist_labels<'a>(
         }
     })
 }
+
+/// Returns the canonical display symbol for a token if (and only if) the
+/// `(chain_id, address)` pair is in our hardcoded REGISTRY. Otherwise
+/// returns `None` — the on-chain `symbol()` is untrusted and may be a
+/// scammer impersonating a well-known token.
+pub fn trusted_symbol_for(chain_id: u64, addr: Address) -> Option<&'static str> {
+    REGISTRY
+        .iter()
+        .find(|t| t.chain_id == chain_id && t.address == addr)
+        .map(|t| t.display_symbol)
+}
