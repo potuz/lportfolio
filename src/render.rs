@@ -59,6 +59,10 @@ pub fn render_history(
     labels: &BTreeMap<(u64, Address), String>,
 ) -> Table {
     let mut table = new_table();
+    // Dynamic arrangement: comfy-table queries the terminal width (via the
+    // `tty` feature) and wraps long cells — keeps the Action column from
+    // overflowing on narrow terminals.
+    table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
     table.set_header(header_row(&["Time (UTC)", "Chain", "Tx", "Action"]));
     for d in decoded {
         let chain = Chain::from_id(d.chain_id)

@@ -26,7 +26,7 @@ alloy = { version = "=1.8.3", default-features = false, features = ["std", "rpc-
 anyhow = "=1.0.102"
 clap = { version = "=4.6.1", features = ["derive"], optional = true }
 clap_complete = { version = "=4.6.3", optional = true }
-comfy-table = { version = "=7.2.2", default-features = false, optional = true }
+comfy-table = { version = "=7.2.2", default-features = false, features = ["tty"], optional = true }
 dirs = "=6.0.0"
 dotenvy = { version = "=0.15.7", optional = true }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
