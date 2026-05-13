@@ -2,7 +2,8 @@ use alloy::primitives::{Address, address};
 
 use super::erc20::{RawTransfer, RawTx};
 use super::{
-    Action, ContractDecoder, KnownContract, ProtocolKind, inbound_assets, outbound_assets,
+    Action, ContractDecoder, KnownContract, ProtocolKind, inbound_assets, native_received,
+    outbound_assets,
 };
 
 const SETTLEMENT: Address = address!("0x9008D19f58AAbD9eD0D60971565AA8510560ab41");
@@ -35,17 +36,24 @@ impl ContractDecoder for Cowswap {
 
         // CoW orders are settled in batches: the user is rarely tx.from. Detect by
         // whether any of the user's transfers in this tx have settlement/relayer as
-        // counterparty.
-        let user_touches_settlement = transfers.iter().any(|t| {
+        // counterparty, or whether the Settlement contract sent the user ETH via
+        // an internal call (the ETH-out side of a swap).
+        let touches_via_transfer = transfers.iter().any(|t| {
             (t.from == us && (t.to == SETTLEMENT || t.to == VAULT_RELAYER))
                 || (t.to == us && (t.from == SETTLEMENT || t.from == VAULT_RELAYER))
         });
-        if !user_touches_settlement {
+        let touches_via_internal = tx.internals.iter().any(|it| {
+            it.success && it.to == us && (it.from == SETTLEMENT || it.from == VAULT_RELAYER)
+        });
+        if !touches_via_transfer && !touches_via_internal {
             return None;
         }
 
         let sent = outbound_assets(us, transfers);
-        let received = inbound_assets(us, transfers);
+        let mut received = inbound_assets(us, transfers);
+        if let Some(eth) = native_received(us, tx) {
+            received.insert(0, eth);
+        }
         if sent.is_empty() && received.is_empty() {
             return None;
         }
@@ -80,6 +88,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 200,
             success: true,
+            internals: Vec::new(),
         };
         let send = RawTransfer {
             token: address!("0x000000000000000000000000000000000000aaaa"),

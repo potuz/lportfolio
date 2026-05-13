@@ -2,8 +2,8 @@ use alloy::primitives::{Address, address};
 
 use super::erc20::{RawTransfer, RawTx};
 use super::{
-    Action, AssetAmount, ContractDecoder, KnownContract, ProtocolKind, inbound_assets, native_sent,
-    outbound_assets,
+    Action, AssetAmount, ContractDecoder, KnownContract, ProtocolKind, inbound_assets,
+    native_received, native_sent, outbound_assets,
 };
 
 const V2_ROUTER: Address = address!("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D");
@@ -69,7 +69,10 @@ impl ContractDecoder for Uniswap {
         if let Some(eth) = native_sent(us, tx) {
             sent.insert(0, eth);
         }
-        let received: Vec<AssetAmount> = inbound_assets(us, transfers);
+        let mut received: Vec<AssetAmount> = inbound_assets(us, transfers);
+        if let Some(eth) = native_received(us, tx) {
+            received.insert(0, eth);
+        }
 
         if sent.is_empty() && received.is_empty() {
             return None;
@@ -105,6 +108,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 132,
             success: true,
+            internals: Vec::new(),
         };
         let send = RawTransfer {
             token: address!("0x000000000000000000000000000000000000beed"),

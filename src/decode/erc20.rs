@@ -12,6 +12,18 @@ pub struct RawTx {
     pub value_wei: U256,
     pub input_len: usize,
     pub success: bool,
+    /// Internal calls (CALL/CALLCODE/CREATE/SELFDESTRUCT) made during this
+    /// tx's execution. Only entries with `value_wei > 0` are interesting
+    /// for native-ETH transfer detection.
+    pub internals: Vec<InternalTx>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalTx {
+    pub from: Address,
+    pub to: Address,
+    pub value_wei: U256,
+    pub success: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +111,7 @@ mod tests {
             value_wei,
             input_len,
             success: true,
+            internals: Vec::new(),
         }
     }
 

@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::chain::Chain;
-use crate::decode::erc20::{RawTransfer, RawTx};
+use crate::decode::erc20::{InternalTx, RawTransfer, RawTx};
 use crate::decode::{DecodedTx, Registry};
-use crate::explorer::{EtherscanTokenTx, EtherscanTx};
+use crate::explorer::{EtherscanInternalTx, EtherscanTokenTx, EtherscanTx};
 
 const SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -106,6 +106,38 @@ CREATE TABLE IF NOT EXISTS ens_cache (
 );
 
 INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+
+-- v3: Internal (sub-call) transactions. Captures ETH moved within a
+-- parent tx's execution — e.g. Uniswap V3's unwrapWETH9 forwarding ETH
+-- to the caller after a swap. `trace_id` is Etherscan's call-stack path
+-- ("0_1", "0_2_4") and disambiguates sibling internal calls within the
+-- same parent tx.
+CREATE TABLE IF NOT EXISTS internal_transactions (
+    chain_id   INTEGER NOT NULL,
+    tx_hash    TEXT NOT NULL,
+    trace_id   TEXT NOT NULL,
+    from_addr  TEXT NOT NULL,
+    to_addr    TEXT NOT NULL,
+    value_wei  TEXT NOT NULL,
+    success    INTEGER NOT NULL,
+    PRIMARY KEY (chain_id, tx_hash, trace_id)
+);
+
+CREATE INDEX IF NOT EXISTS internal_transactions_hash_idx
+    ON internal_transactions(chain_id, tx_hash);
+
+-- Per-(address, chain) watermark for internal-tx sync. Tracked separately
+-- from `sync_state` so existing users (whose sync_state is already at HEAD
+-- for regular txs) can backfill internals without redoing the regular sync.
+CREATE TABLE IF NOT EXISTS internal_sync_state (
+    address    TEXT NOT NULL,
+    chain_id   INTEGER NOT NULL,
+    last_block INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (address, chain_id)
+);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (3);
 "#;
 
 pub struct Db {
@@ -282,6 +314,73 @@ impl Db {
             transfer_count: token_txs.len(),
             highest_block: highest.unwrap_or(0),
         })
+    }
+
+    /// Last block we successfully pulled internal txs from, for this
+    /// (address, chain). Defaults to 0 so existing users backfill from
+    /// genesis on their next sync.
+    pub fn last_internal_synced_block(&self, address: Address, chain: Chain) -> Result<u64> {
+        let block: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT last_block FROM internal_sync_state
+                  WHERE address = ?1 AND chain_id = ?2",
+                params![addr_to_db(address), chain.id() as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(block.map(|b| b.max(0) as u64).unwrap_or(0))
+    }
+
+    /// Insert a batch of internal txs (idempotent on `(chain, hash, trace_id)`)
+    /// and advance the per-address watermark. Returns how many rows were
+    /// inserted (informational; INSERT OR IGNORE swallows duplicates).
+    pub fn record_internals(
+        &mut self,
+        chain: Chain,
+        address: Address,
+        internals: &[EtherscanInternalTx],
+    ) -> Result<usize> {
+        let tx_db = self.conn.transaction()?;
+        let chain_id = chain.id() as i64;
+        let mut inserted = 0usize;
+        for it in internals {
+            // Etherscan returns "" for `to` on contract creations; skip those
+            // because no ETH lands at an address we care about.
+            if it.to.is_empty() {
+                continue;
+            }
+            let success = it.is_error == "0";
+            let n = tx_db.execute(
+                "INSERT OR IGNORE INTO internal_transactions
+                   (chain_id, tx_hash, trace_id, from_addr, to_addr, value_wei, success)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    chain_id,
+                    it.hash,
+                    it.trace_id,
+                    it.from.to_lowercase(),
+                    it.to.to_lowercase(),
+                    it.value,
+                    if success { 1 } else { 0 },
+                ],
+            )?;
+            inserted += n;
+        }
+
+        let highest = internals.iter().map(|i| i.block_number).max();
+        if let Some(block) = highest {
+            tx_db.execute(
+                "INSERT INTO internal_sync_state (address, chain_id, last_block, updated_at)
+                 VALUES (?1, ?2, ?3, strftime('%s','now'))
+                 ON CONFLICT(address, chain_id) DO UPDATE SET
+                   last_block = max(last_block, excluded.last_block),
+                   updated_at = strftime('%s','now')",
+                params![addr_to_db(address), chain_id, block as i64],
+            )?;
+        }
+        tx_db.commit()?;
+        Ok(inserted)
     }
 
     pub fn read_staking_snapshot(
@@ -634,6 +733,7 @@ impl Db {
             .map(|s| s.parse::<Address>().context("parsing tx to"))
             .transpose()?;
         let value_wei = value_s.parse::<U256>().context("parsing tx value")?;
+        let internals = self.fetch_internals(chain_id, hash)?;
         Ok(RawTx {
             chain_id: chain_id as u64,
             hash: hash.to_string(),
@@ -643,7 +743,36 @@ impl Db {
             value_wei,
             input_len: input_len as usize,
             success: status != 0,
+            internals,
         })
+    }
+
+    fn fetch_internals(&self, chain_id: i64, tx_hash: &str) -> Result<Vec<InternalTx>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_addr, to_addr, value_wei, success
+               FROM internal_transactions
+              WHERE chain_id = ?1 AND tx_hash = ?2
+              ORDER BY trace_id",
+        )?;
+        let rows = stmt.query_map(params![chain_id, tx_hash], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (from_s, to_s, value_s, success) = row?;
+            out.push(InternalTx {
+                from: from_s.parse().context("parsing internal from")?,
+                to: to_s.parse().context("parsing internal to")?,
+                value_wei: value_s.parse().context("parsing internal value")?,
+                success: success != 0,
+            });
+        }
+        Ok(out)
     }
 
     fn fetch_transfers(&self, chain_id: i64, tx_hash: &str) -> Result<Vec<RawTransfer>> {
@@ -740,7 +869,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         std::fs::remove_file(&tmp).ok();
     }

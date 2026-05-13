@@ -176,6 +176,7 @@ mod tests {
             value_wei: one_eth(),
             input_len: 4,
             success: true,
+            internals: Vec::new(),
         };
         let xfer = RawTransfer {
             token: STETH,
@@ -210,6 +211,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 64,
             success: true,
+            internals: Vec::new(),
         };
         let send_steth = RawTransfer {
             token: STETH,
@@ -251,6 +253,7 @@ mod tests {
             value_wei: one_eth(),
             input_len: 0,
             success: true,
+            internals: Vec::new(),
         };
         let lido = Lido;
         assert!(lido.decode(us(), &tx, &[]).is_none());

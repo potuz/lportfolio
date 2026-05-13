@@ -208,3 +208,26 @@ pub(crate) fn native_sent(us: Address, tx: &RawTx) -> Option<AssetAmount> {
         None
     }
 }
+
+/// Sum of ETH received by `us` via successful internal calls inside this
+/// tx (e.g. Uniswap's `unwrapWETH9` forwarding native ETH after a swap).
+/// Returns `None` if no internal transfer landed at `us`.
+pub(crate) fn native_received(us: Address, tx: &RawTx) -> Option<AssetAmount> {
+    use alloy::primitives::U256;
+    let mut total = U256::ZERO;
+    for it in &tx.internals {
+        if it.success && it.to == us && it.from != us && !it.value_wei.is_zero() {
+            total += it.value_wei;
+        }
+    }
+    if total.is_zero() {
+        None
+    } else {
+        Some(AssetAmount {
+            token: None,
+            symbol: "ETH".into(),
+            decimals: 18,
+            amount: total,
+        })
+    }
+}

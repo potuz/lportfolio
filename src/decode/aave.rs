@@ -85,6 +85,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 100,
             success: true,
+            internals: Vec::new(),
         };
         let send_usdc = RawTransfer {
             token: address!("0x000000000000000000000000000000000000beed"),
@@ -125,6 +126,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 100,
             success: true,
+            internals: Vec::new(),
         };
         assert!(AaveV3.decode(us(), &tx, &[]).is_none());
     }

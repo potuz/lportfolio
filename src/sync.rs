@@ -25,11 +25,30 @@ pub async fn sync_address(
     let token_txs = explorer.tokentx(chain, &address_hex, start).await?;
 
     let summary = db.record_sync(chain, address, &txs, &token_txs)?;
+
+    // Internal txs are tracked under a separate watermark so existing users
+    // (whose sync_state is already at HEAD for regular txs) still backfill
+    // internals from genesis on the first run after this feature lands.
+    let internal_start = db
+        .last_internal_synced_block(address, chain)?
+        .saturating_add(1);
+    info!(
+        chain = chain.name(),
+        alias,
+        start = internal_start,
+        "fetching txlistinternal"
+    );
+    let internals = explorer
+        .txlistinternal(chain, &address_hex, internal_start)
+        .await?;
+    let internal_inserted = db.record_internals(chain, address, &internals)?;
+
     info!(
         chain = chain.name(),
         alias,
         new_txs = summary.tx_count,
         new_transfers = summary.transfer_count,
+        new_internals = internal_inserted,
         highest_block = summary.highest_block,
         "sync complete"
     );

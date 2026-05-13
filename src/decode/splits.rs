@@ -92,6 +92,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 100,
             success: true,
+            internals: Vec::new(),
         };
         let recv = RawTransfer {
             token: address!("0x000000000000000000000000000000000000beed"),

@@ -39,6 +39,32 @@ pub struct EtherscanTx {
     pub is_error: String,
 }
 
+/// An internal (sub-)transaction returned by Etherscan's
+/// `account?action=txlistinternal`. These are CALL/CALLCODE/DELEGATECALL/
+/// CREATE/SELFDESTRUCT operations that the EVM made *while executing* a
+/// top-level transaction; they're the only way native ETH gets moved
+/// without a corresponding `txlist` entry (e.g. Uniswap V3 `unwrapWETH9`
+/// forwarding ETH to the caller).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EtherscanInternalTx {
+    #[serde(rename = "blockNumber", deserialize_with = "de_u64_str")]
+    pub block_number: u64,
+    #[serde(rename = "timeStamp", deserialize_with = "de_u64_str")]
+    pub timestamp: u64,
+    pub hash: String,
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+    pub value: String,
+    /// Stable identifier of this internal call within its parent tx
+    /// (e.g. "0", "0_1", "0_2_4"). Used as the primary-key disambiguator
+    /// so two internal calls from the same parent tx don't collide.
+    #[serde(rename = "traceId", default)]
+    pub trace_id: String,
+    #[serde(rename = "isError", default)]
+    pub is_error: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct EtherscanTokenTx {
     #[serde(rename = "blockNumber", deserialize_with = "de_u64_str")]
@@ -68,6 +94,12 @@ impl HasBlockNumber for EtherscanTx {
 }
 
 impl HasBlockNumber for EtherscanTokenTx {
+    fn block_number(&self) -> u64 {
+        self.block_number
+    }
+}
+
+impl HasBlockNumber for EtherscanInternalTx {
     fn block_number(&self) -> u64 {
         self.block_number
     }
@@ -130,6 +162,16 @@ impl Explorer {
         from_block: u64,
     ) -> Result<Vec<EtherscanTokenTx>> {
         self.fetch_account("tokentx", chain, address, from_block)
+            .await
+    }
+
+    pub async fn txlistinternal(
+        &self,
+        chain: Chain,
+        address: &str,
+        from_block: u64,
+    ) -> Result<Vec<EtherscanInternalTx>> {
+        self.fetch_account("txlistinternal", chain, address, from_block)
             .await
     }
 

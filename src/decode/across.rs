@@ -103,6 +103,7 @@ mod tests {
             value_wei: U256::ZERO,
             input_len: 200,
             success: true,
+            internals: Vec::new(),
         };
         let send = RawTransfer {
             token: address!("0x000000000000000000000000000000000000beed"),

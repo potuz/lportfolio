@@ -7,7 +7,7 @@ use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
 
 use crate::chain::Chain;
-use crate::decode::{Action, AssetAmount, DecodedTx, Direction};
+use crate::decode::{Action, AssetAmount, DecodedTx, Direction, ProtocolKind};
 use crate::holdings::{CsmRow, NativeRow, PortfolioSnapshot, SplitsRow, StakingRow, gwei_to_wei};
 use crate::portfolio_view::{CellAgg, format_usd};
 use crate::prices::PriceTable;
@@ -179,6 +179,22 @@ fn format_action(
             sent,
             received,
         } => {
+            // Swaps render as "[Proto] Swap: A → B" — much more readable than
+            // the generic "sent A received B" form, and signals symmetry.
+            if matches!(kind, ProtocolKind::Swap) {
+                let left = if sent.is_empty() {
+                    "?".to_string()
+                } else {
+                    join_assets(sent, chain_id)
+                };
+                let right = if received.is_empty() {
+                    "?".to_string()
+                } else {
+                    join_assets(received, chain_id)
+                };
+                let proto_link = display_address(*contract, chain_id, aliases, labels);
+                return format!("[{protocol}] Swap ({proto_link}): {left} → {right}");
+            }
             let header = format!(
                 "[{protocol}] {kind} ({})",
                 display_address(*contract, chain_id, aliases, labels),
