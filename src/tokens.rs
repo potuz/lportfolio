@@ -126,3 +126,20 @@ pub fn deployments_for(chain_id: u64, whitelist: &[String]) -> Vec<&'static Whit
         .filter(|t| t.chain_id == chain_id && whitelist.iter().any(|w| w == t.whitelist_id))
         .collect()
 }
+
+/// Yields `(chain_id, contract_address, display_symbol)` for every
+/// `WhitelistedToken` whose `whitelist_id` appears in `whitelist`. Used by
+/// the history view to auto-label token contracts the user already cares
+/// about (since the whitelist already implies "render this as a known
+/// thing").
+pub fn whitelist_labels<'a>(
+    whitelist: &'a [String],
+) -> impl Iterator<Item = (u64, Address, &'static str)> + 'a {
+    REGISTRY.iter().filter_map(move |t| {
+        if whitelist.iter().any(|w| w == t.whitelist_id) {
+            Some((t.chain_id, t.address, t.display_symbol))
+        } else {
+            None
+        }
+    })
+}

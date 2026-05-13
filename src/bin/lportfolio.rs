@@ -310,6 +310,15 @@ fn history_cmd(
             .entry((known.chain_id, known.address))
             .or_insert_with(|| known.label.to_string());
     }
+    // Token-whitelist overlay — every contract address the user has
+    // listed in LPORTFOLIO_TOKEN_WHITELIST gets its display_symbol as a
+    // label. Lower priority than decoder-known labels (those already
+    // include curated names for the major protocols) but higher than ENS.
+    for (chain_id, addr, sym) in lportfolio::tokens::whitelist_labels(&cfg.token_whitelist) {
+        labels
+            .entry((chain_id, addr))
+            .or_insert_with(|| sym.to_string());
+    }
     // ENS overlay — lowest priority. Canonical mainnet reverse applies to
     // every chain, so the same name is inserted once per Chain::ALL entry.
     let ens_names = db.ens_load_all()?;
