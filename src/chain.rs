@@ -47,6 +47,17 @@ impl Chain {
     pub fn from_id(id: u64) -> Option<Self> {
         Self::ALL.iter().copied().find(|c| c.id() == id)
     }
+
+    /// Base URL of the user-facing block explorer for this chain.
+    /// Appended with `/tx/<hash>` or `/address/<addr>` to form deep links.
+    pub fn explorer_url(self) -> &'static str {
+        match self {
+            Self::Mainnet => "https://etherscan.io",
+            Self::Arbitrum => "https://arbiscan.io",
+            Self::Optimism => "https://optimistic.etherscan.io",
+            Self::Base => "https://basescan.org",
+        }
+    }
 }
 
 impl fmt::Display for Chain {

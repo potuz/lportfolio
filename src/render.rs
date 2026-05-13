@@ -41,6 +41,18 @@ pub mod paint {
             format!("== {text} ==")
         }
     }
+
+    /// OSC 8 terminal hyperlink. Most modern terminals
+    /// (foot, kitty, wezterm, iTerm2, gnome-terminal,
+    /// Windows Terminal) render the text styled-as-link and open `url`
+    /// on click. Falls back to the bare text when stdout isn't a TTY.
+    pub fn hyperlink(text: &str, url: &str) -> String {
+        if enabled() {
+            format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+        } else {
+            text.to_string()
+        }
+    }
 }
 
 fn new_table() -> Table {
@@ -65,11 +77,18 @@ pub fn render_history(
     table.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
     table.set_header(header_row(&["Time (UTC)", "Chain", "Tx", "Action"]));
     for d in decoded {
-        let chain = Chain::from_id(d.chain_id)
+        let chain_obj = Chain::from_id(d.chain_id);
+        let chain = chain_obj
             .map(|c| c.name().to_string())
             .unwrap_or_else(|| d.chain_id.to_string());
         let when = format_unix_utc(d.timestamp);
-        let hash_short = short_hash(&d.hash);
+        let hash_text = short_hash(&d.hash);
+        // Hyperlink the tx hash short-form to the chain's block explorer.
+        // Falls back to plain text when stdout isn't a TTY.
+        let hash_cell = match chain_obj {
+            Some(c) => paint::hyperlink(&hash_text, &format!("{}/tx/{}", c.explorer_url(), d.hash)),
+            None => hash_text,
+        };
 
         if d.actions.is_empty() {
             let action_text = if d.success {
@@ -80,7 +99,7 @@ pub fn render_history(
             table.add_row(vec![
                 when.clone(),
                 chain.clone(),
-                hash_short.clone(),
+                hash_cell.clone(),
                 action_text,
             ]);
             continue;
@@ -96,7 +115,7 @@ pub fn render_history(
             table.add_row(vec![
                 when.clone(),
                 chain.clone(),
-                hash_short.clone(),
+                hash_cell.clone(),
                 prefixed,
             ]);
         }
@@ -206,12 +225,21 @@ fn display_address(
     aliases: &BTreeMap<Address, String>,
     labels: &BTreeMap<(u64, Address), String>,
 ) -> String {
-    if let Some(alias) = aliases.get(&addr) {
+    let text = if let Some(alias) = aliases.get(&addr) {
         alias.clone()
     } else if let Some(label) = labels.get(&(chain_id, addr)) {
         label.clone()
     } else {
         short_addr(addr)
+    };
+    // Wrap every rendered address in an OSC 8 hyperlink to the chain's
+    // block explorer. Falls back to plain text on non-TTY stdout.
+    match Chain::from_id(chain_id) {
+        Some(chain) => paint::hyperlink(
+            &text,
+            &format!("{}/address/{:#x}", chain.explorer_url(), addr),
+        ),
+        None => text,
     }
 }
 
