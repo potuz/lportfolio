@@ -60,9 +60,10 @@ impl EnsResolver {
 
     /// Reverse-resolve an address via the Universal Resolver.
     ///
-    /// `Ok(None)` is a confirmed miss (no reverse record, or forward
-    /// verification failed) and should be cached. `Err` indicates a
-    /// transient transport/timeout/decode failure and must NOT be cached.
+    /// `Ok(None)` is a confirmed miss (no reverse record, forward
+    /// verification failed, or any deterministic contract revert) and
+    /// should be cached. `Err` indicates a transient transport/timeout
+    /// failure and must NOT be cached.
     pub async fn reverse(&self, addr: Address) -> Result<Option<String>> {
         let mut attempt: u32 = 0;
         let wire = encode_reverse_name(addr);
@@ -76,6 +77,13 @@ impl EnsResolver {
                         return Ok(None);
                     }
                     return Ok(Some(ret.name));
+                }
+                Ok(Err(e)) if is_contract_revert(&e) => {
+                    // Deterministic — same input will revert the same way next
+                    // sync. Treat as a confirmed miss so we cache it and stop
+                    // hammering. Covers ResolverNotFound, UnsupportedResolverProfile,
+                    // ReverseAddressMismatch, etc.
+                    return Ok(None);
                 }
                 Ok(Err(e)) if attempt < MAX_RETRIES => {
                     attempt += 1;
@@ -109,6 +117,17 @@ impl EnsResolver {
             }
         }
     }
+}
+
+/// Detect contract-level reverts (deterministic) vs. transport errors
+/// (transient). The Universal Resolver returns several custom errors
+/// (ResolverNotFound, UnsupportedResolverProfile, ReverseAddressMismatch,
+/// …) for addresses with no usable reverse record — these manifest as
+/// `execution reverted` from the RPC. Heuristic match on the message
+/// because alloy::contract::Error variants are version-sensitive.
+fn is_contract_revert(e: &alloy::contract::Error) -> bool {
+    let s = format!("{e}");
+    s.contains("execution reverted")
 }
 
 /// DNS-wire encoding of `<addr-no-0x-lowercase>.addr.reverse`.
